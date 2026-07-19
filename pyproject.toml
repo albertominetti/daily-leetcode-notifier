@@ -1,0 +1,23 @@
+[project]
+name = "daily-leetcode-notifier"
+version = "0.1.0"
+description = "Check LeetCode's daily challenge and notify via Telegram if it is not done"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "daily-leetcode-notifier contributors" }]
+keywords = ["leetcode", "telegram", "cron", "daily-challenge", "uv"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.urls]
+# Homepage = "https://github.com/YOUR_USER/daily-leetcode-notifier"
+# Repository = "https://github.com/YOUR_USER/daily-leetcode-notifier"
