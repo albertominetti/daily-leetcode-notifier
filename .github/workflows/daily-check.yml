@@ -1,0 +1,120 @@
+# Run the LeetCode daily check on a schedule and notify via Telegram.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   LEETCODE_SESSION
+#   TELEGRAM_BOT_TOKEN
+#   TELEGRAM_CHAT_ID
+#
+# Optional:
+#   LEETCODE_CSRFTOKEN
+#
+# Cron uses UTC. Adjust times if you want a specific local timezone.
+# Default pattern (UTC): quiet status at 10/14/18, loud incomplete alert at 23.
+
+name: Daily LeetCode check
+
+on:
+  schedule:
+    # Quiet status checks (Telegram --notify --silent)
+    - cron: "0 10 * * *" # 10:00 UTC
+    - cron: "0 14 * * *" # 14:00 UTC
+    - cron: "0 18 * * *" # 18:00 UTC
+    # Loud alert only if the daily is still open
+    - cron: "0 23 * * *" # 23:00 UTC
+  workflow_dispatch:
+    inputs:
+      silent:
+        description: "Use silent Telegram delivery (disable_notification)"
+        type: boolean
+        default: true
+      notify:
+        description: "Send Telegram notification"
+        type: boolean
+        default: true
+
+concurrency:
+  group: daily-leetcode-check
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check daily challenge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Sync project
+        run: uv sync
+
+      - name: Decide notify flags
+        id: flags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NOTIFY="true"
+          SILENT="true"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            NOTIFY="${{ inputs.notify }}"
+            SILENT="${{ inputs.silent }}"
+          else
+            # Match scheduled cron expression (UTC)
+            case "${{ github.event.schedule }}" in
+              "0 23 * * *")
+                SILENT="false"
+                ;;
+              *)
+                SILENT="true"
+                ;;
+            esac
+            NOTIFY="true"
+          fi
+
+          ARGS=()
+          if [ "$NOTIFY" = "true" ]; then
+            ARGS+=(--notify)
+            if [ "$SILENT" = "true" ]; then
+              ARGS+=(--silent)
+            fi
+          fi
+
+          # shellcheck disable=SC2086
+          echo "args=${ARGS[*]-}" >> "$GITHUB_OUTPUT"
+          echo "Resolved flags: ${ARGS[*]-}"
+
+      - name: Run check_daily.py
+        env:
+          LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+          LEETCODE_CSRFTOKEN: ${{ secrets.LEETCODE_CSRFTOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # Exit codes: 0 done, 1 not done, 2 error, 3 not signed in.
+        # Do not fail the workflow for "not done" (1) or "not signed in" (3);
+        # those are expected outcomes (Telegram already notified).
+        # Fail the job only on hard errors (2).
+        run: |
+          set +e
+          # shellcheck disable=SC2086
+          uv run check_daily.py ${{ steps.flags.outputs.args }}
+          code=$?
+          set -e
+          echo "Exit code: $code"
+          if [ "$code" -eq 2 ]; then
+            exit 2
+          fi
+          exit 0

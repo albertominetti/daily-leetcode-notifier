@@ -20,6 +20,7 @@ Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dep
 - `--silent` for quiet Telegram deliveries (no sound/vibration)
 - Auth and API failures **always alert** (never silent)
 - Zero pip packages; works offline once `uv` has a Python interpreter
+- **GitHub Actions** schedule with secrets stored in the repository
 
 ---
 
@@ -33,6 +34,8 @@ Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dep
 
 ## Setup
 
+### Local
+
 ```bash
 git clone <your-repo-url> daily-leetcode-notifier
 cd daily-leetcode-notifier
@@ -42,7 +45,7 @@ cp .env.example .env
 # edit .env — see below
 ```
 
-### Environment variables
+### Environment variables / secrets
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
@@ -51,9 +54,77 @@ cp .env.example .env
 | `TELEGRAM_BOT_TOKEN` | For `--notify` | Bot token from [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | For `--notify` | Your user or group chat id |
 
+**Local:** put them in `.env` (gitignored).
+
 **LeetCode cookie:** log in at [leetcode.com](https://leetcode.com) → DevTools → Application/Storage → Cookies → copy `LEETCODE_SESSION`.
 
 **Telegram:** create a bot with BotFather, send `/start` to the bot, then resolve your chat id (e.g. [@userinfobot](https://t.me/userinfobot) or `getUpdates`).
+
+---
+
+## GitHub Actions
+
+Workflow file: [`.github/workflows/daily-check.yml`](.github/workflows/daily-check.yml)
+
+Runs the same check on GitHub-hosted runners and sends Telegram messages using **repository secrets** (never commit tokens to the repo).
+
+### 1. Add repository secrets
+
+In your GitHub repo:
+
+**Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret name | Value |
+|-------------|--------|
+| `LEETCODE_SESSION` | Your LeetCode session cookie |
+| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
+| `TELEGRAM_CHAT_ID` | Your Telegram chat id |
+| `LEETCODE_CSRFTOKEN` | *(optional)* CSRF cookie |
+
+### 2. Enable Actions
+
+Push the workflow (or enable Actions if this is a fork). Scheduled workflows only run on the **default branch** (usually `main`).
+
+### 3. Schedule (UTC)
+
+GitHub Actions `cron` is always **UTC** (not your laptop timezone). The workflow ships with the same *logical* pattern as the local cron examples:
+
+| Cron (UTC) | Flags | Intent |
+|------------|-------|--------|
+| `0 10 * * *` | `--notify --silent` | Quiet status |
+| `0 14 * * *` | `--notify --silent` | Quiet status |
+| `0 18 * * *` | `--notify --silent` | Quiet status |
+| `0 23 * * *` | `--notify` | Alert with sound if still not done |
+
+Edit the `schedule:` block in the workflow if you need different UTC hours (e.g. map 23:00 local to UTC).
+
+> **Note:** GitHub can delay scheduled jobs by several minutes (sometimes more) under load. For a guaranteed local-time ping, keep machine cron as a backup.
+
+### 4. Manual run
+
+**Actions → Daily LeetCode check → Run workflow**
+
+Inputs:
+
+- **notify** — send Telegram (default on)
+- **silent** — quiet delivery (default on)
+
+### 5. Job success vs “not done”
+
+The workflow **fails only on hard errors** (exit code `2`: network / GraphQL / Telegram).  
+Exit codes `0` (done), `1` (not done), and `3` (not signed in) still finish the job green so Actions noise stays low; Telegram still carries the real status.
+
+### Example: wire secrets in the workflow
+
+Secrets are injected as environment variables (already done in the workflow):
+
+```yaml
+env:
+  LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
+  LEETCODE_CSRFTOKEN: ${{ secrets.LEETCODE_CSRFTOKEN }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+```
 
 ---
 
@@ -115,9 +186,9 @@ python3 check_daily.py --env-file .env
 
 ---
 
-## Scheduling with cron (examples)
+## Scheduling with cron (local examples)
 
-The script does **not** hardcode times. You choose when it runs via **cron** (or systemd timers, GitHub Actions, etc.). Below is one sensible daily pattern.
+The script does **not** hardcode times. You choose when it runs via **cron**, **GitHub Actions** (see above), or systemd timers. Below is one sensible daily pattern for a machine crontab (local timezone).
 
 ### Suggested logic
 
@@ -207,14 +278,16 @@ Only alert when incomplete (no “already done” noise):
 
 ```text
 daily-leetcode-notifier/
-├── check_daily.py    # single script (CLI + LeetCode + Telegram)
-├── pyproject.toml    # uv project metadata
+├── check_daily.py                 # single script (CLI + LeetCode + Telegram)
+├── pyproject.toml                 # uv project metadata
 ├── uv.lock
 ├── .python-version
-├── .env.example      # template — copy to .env
+├── .env.example                   # template — copy to .env
 ├── .gitignore
 ├── LICENSE
-└── README.md
+├── README.md
+└── .github/workflows/
+    └── daily-check.yml            # scheduled GitHub Action
 ```
 
 ---
