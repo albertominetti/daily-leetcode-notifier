@@ -85,27 +85,18 @@ In your GitHub repo:
 
 Push the workflow (or enable Actions if this is a fork). Scheduled workflows only run on the **default branch** (usually `main`).
 
-### 3. Schedule (Europe/Zurich)
+### 3. Schedule (Europe/Zurich, 4 runs)
 
-GitHub Actions `cron` is **always UTC**, so the workflow cannot set `CRON_TZ` directly. Instead it:
+GitHub Actions `cron` is **always UTC**. The workflow uses **four** UTC times that match **Europe/Zurich in winter (CET, UTC+1)**. In summer (CEST) they run one hour later locally.
 
-1. Fires at every **UTC** hour that can be 10:00 / 14:00 / 18:00 / 23:00 in **Europe/Zurich** under both CET (UTC+1) and CEST (UTC+2)
-2. Reads the current hour with `TZ=Europe/Zurich`
-3. **Runs** only on those local hours; **skips** the off-season UTC fire
+| Europe/Zurich (CET) | UTC cron | Flags | Intent |
+|---------------------|----------|-------|--------|
+| **10:00** | `0 9 * * *` | `--notify --silent` | Quiet status |
+| **14:00** | `0 13 * * *` | `--notify --silent` | Quiet status |
+| **18:00** | `0 17 * * *` | `--notify --silent` | Quiet status |
+| **23:00** | `0 22 * * *` | `--notify` | Alert if still not done |
 
-| Europe/Zurich | Flags | Intent |
-|---------------|-------|--------|
-| **10:00** | `--notify --silent` | Quiet status |
-| **14:00** | `--notify --silent` | Quiet status |
-| **18:00** | `--notify --silent` | Quiet status |
-| **23:00** | `--notify` | Alert with sound if still not done |
-
-| Season | Zurich target | UTC cron fires |
-|--------|---------------|----------------|
-| CET (winter, UTC+1) | 10 / 14 / 18 / 23 | 09 / 13 / 17 / 22 |
-| CEST (summer, UTC+2) | 10 / 14 / 18 / 23 | 08 / 12 / 16 / 21 |
-
-> **Note:** GitHub can delay scheduled jobs by several minutes under load. For a hard local-time guarantee on your machine, keep a system crontab as a backup.
+> **Note:** GitHub can delay scheduled jobs by a few minutes. For exact local time on your machine, use system cron.
 
 ### 4. Manual run
 
