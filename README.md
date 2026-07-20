@@ -17,7 +17,7 @@ Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dep
 - Daily problem info (title, difficulty, link, optional tags)
 - Completion check for the authenticated user
 - Telegram messages with HTML formatting (done / not done / session errors)
-- `--silent` for quiet Telegram deliveries (no sound/vibration)
+- `--silent` for quiet reminders when the daily is still open (no message if already done)
 - Auth and API failures **always alert** (never silent)
 - Zero pip packages; works offline once `uv` has a Python interpreter
 - **GitHub Actions** schedule with secrets stored in the repository
@@ -91,10 +91,10 @@ GitHub Actions `cron` is **always UTC**. The workflow uses **four** UTC times th
 
 | Europe/Zurich (CET) | UTC cron | Flags | Intent |
 |---------------------|----------|-------|--------|
-| **10:00** | `0 9 * * *` | `--notify --silent` | Quiet status |
-| **14:00** | `0 13 * * *` | `--notify --silent` | Quiet status |
-| **18:00** | `0 17 * * *` | `--notify --silent` | Quiet status |
-| **23:00** | `0 22 * * *` | `--notify` | Alert if still not done |
+| **10:00** | `0 9 * * *` | `--notify --silent` | Quiet reminder only if not done |
+| **14:00** | `0 13 * * *` | `--notify --silent` | Quiet reminder only if not done |
+| **18:00** | `0 17 * * *` | `--notify --silent` | Quiet reminder only if not done |
+| **23:00** | `0 22 * * *` | `--notify` | Sound alert only if not done |
 
 > **Note:** GitHub can delay scheduled jobs by a few minutes. For exact local time on your machine, use system cron.
 
@@ -138,7 +138,7 @@ uv run check_daily.py --tags
 # JSON (for scripts)
 uv run check_daily.py --json
 
-# Telegram — quiet status (done or not done)
+# Telegram — quiet reminder only if still not done
 uv run check_daily.py --notify --silent
 
 # Telegram — alert with sound only if still not done
@@ -160,7 +160,7 @@ python3 check_daily.py --env-file .env
 | `--json` | Machine-readable JSON |
 | `--tags` | Include topic tags (hidden by default) |
 | `--notify` | Send a Telegram message |
-| `--silent` | With `--notify`: quiet delivery (`disable_notification`). Auth/API errors ignore this and always alert |
+| `--silent` | With `--notify`: if still open, quiet delivery (`disable_notification`). **No message if already done.** Auth/API errors always alert |
 | `--env-file PATH` | Env file to load (default: `.env`) |
 | `--quiet-ok` | Suppress stdout when the daily is already done |
 
@@ -168,7 +168,7 @@ python3 check_daily.py --env-file .env
 
 | Situation | `--notify --silent` | `--notify` |
 |-----------|---------------------|------------|
-| Daily **done** | Silent “DONE” | *No message* |
+| Daily **done** | *No message* | *No message* |
 | Daily **not done** | Silent “NOT DONE” | **Alert** (sound) |
 | Session invalid | **Alert** (never silent) | **Alert** |
 | API / network error | **Alert** (never silent) | **Alert** |
@@ -192,23 +192,24 @@ The script does **not** hardcode times. You choose when it runs via **cron**, **
 
 | Local time | Flags | Intent |
 |------------|-------|--------|
-| **10:00** | `--notify --silent` | Morning check-in: quiet status whether done or not |
-| **14:00** | `--notify --silent` | Midday reminder: still quiet |
-| **18:00** | `--notify --silent` | Evening check: still quiet |
-| **23:00** | `--notify` | Last call: **only if not done**, with sound so you notice |
+| **10:00** | `--notify --silent` | Quiet reminder **only if not done** |
+| **14:00** | `--notify --silent` | Quiet reminder **only if not done** |
+| **18:00** | `--notify --silent` | Quiet reminder **only if not done** |
+| **23:00** | `--notify` | Last call: **only if not done**, with sound |
 
 **Why silent earlier and loud at night?**
 
-- During the day you want awareness without interruption.
-- Late evening you want a real alert if the streak/daily is still open.
-- Session/cookie problems should always wake you up, so the script **never** sends auth or API failures as silent messages (even with `--silent`).
+- If the daily is already solved, **no Telegram message** at any slot.
+- During the day, incomplete dailies get a quiet nudge.
+- Late evening, incomplete dailies get a real alert.
+- Session/cookie problems always alert with sound (even with `--silent`).
 
 ```text
         10:00          14:00          18:00          23:00
           |              |              |              |
           v              v              v              v
-     quiet status   quiet status   quiet status   alert if open
-     (done/not)     (done/not)     (done/not)     (sound on)
+     quiet if open  quiet if open  quiet if open  alert if open
+     (skip if done) (skip if done) (skip if done) (skip if done)
 ```
 
 ### Example crontab

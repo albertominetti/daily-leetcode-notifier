@@ -431,8 +431,9 @@ def notify_challenge(
 
     Rules:
     - Auth invalid: always send, never silent.
-    - --silent (prefer_silent): send done/not-done status silently.
-    - without --silent: send only when not done (with sound); skip when done.
+    - Already solved: never notify (silent or not).
+    - Not done + --silent: quiet reminder.
+    - Not done without --silent: alert with sound.
     """
     bot_token, chat_id = resolve_telegram_target()
 
@@ -445,17 +446,7 @@ def notify_challenge(
         )
         return
 
-    if prefer_silent:
-        # 14:00 / 18:00 style: always report status, silently
-        send_telegram(
-            format_telegram_status(challenge),
-            bot_token=bot_token,
-            chat_id=chat_id,
-            silent=True,
-        )
-        return
-
-    # Non-silent mode (23:00 style): only ping if still incomplete
+    # No ping once the daily is already solved
     if challenge.is_done:
         return
 
@@ -463,7 +454,7 @@ def notify_challenge(
         format_telegram_status(challenge),
         bot_token=bot_token,
         chat_id=chat_id,
-        silent=False,
+        silent=prefer_silent,
     )
 
 
@@ -514,7 +505,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--silent",
         action="store_true",
         help=(
-            "With --notify: deliver status quietly (disable_notification). "
+            "With --notify: if the daily is still open, deliver quietly "
+            "(disable_notification). Skips Telegram entirely when already done. "
             "Auth/API errors are never silent. Without --notify this flag is ignored."
         ),
     )
