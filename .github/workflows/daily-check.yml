@@ -11,8 +11,8 @@
 # Four runs only. Cron is UTC; times below match Europe/Zurich in winter (CET,
 # UTC+1). In summer (CEST, UTC+2) they fire one hour later local time.
 #
-# Scheduled runs use --skip-if-done so completed dailies stay quiet.
-# Manual workflow_dispatch can always notify (skip_if_done input, default false).
+# --notify only messages when the daily is still incomplete (errors always).
+# Manual runs may pass always=true to also report when already solved.
 
 name: Daily LeetCode check
 
@@ -33,8 +33,8 @@ on:
         description: "Quiet Telegram delivery (disable_notification)"
         type: boolean
         default: false
-      skip_if_done:
-        description: "Skip Telegram when the daily is already solved"
+      always:
+        description: "Also notify when the daily is already solved"
         type: boolean
         default: false
 
@@ -79,12 +79,12 @@ jobs:
 
           NOTIFY="true"
           SILENT="true"
-          SKIP_IF_DONE="true"
+          ALWAYS="false"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             NOTIFY="${{ inputs.notify }}"
             SILENT="${{ inputs.silent }}"
-            SKIP_IF_DONE="${{ inputs.skip_if_done }}"
+            ALWAYS="${{ inputs.always }}"
           else
             # Night slot (23:00 Zurich / 22:00 UTC under CET): sound if open
             case "${{ github.event.schedule }}" in
@@ -96,7 +96,7 @@ jobs:
                 ;;
             esac
             NOTIFY="true"
-            SKIP_IF_DONE="true"
+            ALWAYS="false"
           fi
 
           ARGS=()
@@ -105,8 +105,8 @@ jobs:
             if [ "$SILENT" = "true" ]; then
               ARGS+=(--silent)
             fi
-            if [ "$SKIP_IF_DONE" = "true" ]; then
-              ARGS+=(--skip-if-done)
+            if [ "$ALWAYS" = "true" ]; then
+              ARGS+=(--always)
             fi
           fi
 

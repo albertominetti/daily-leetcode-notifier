@@ -3,9 +3,9 @@
 Check LeetCode's daily coding challenge and whether the authenticated user
 has already solved it.
 
-Optional Telegram alerts via --notify (use --silent for quiet deliveries,
---skip-if-done to suppress messages when the daily is already solved).
-Authentication errors are never sent as silent Telegram notifications.
+Optional Telegram alerts via --notify (incomplete by default; use --always
+to also report when done; --silent for quiet deliveries).
+Authentication errors always notify and are never silent.
 """
 
 from __future__ import annotations
@@ -426,15 +426,15 @@ def notify_challenge(
     challenge: DailyChallenge,
     *,
     prefer_silent: bool,
-    skip_if_done: bool,
+    always: bool,
 ) -> None:
     """
     Send a Telegram message for a successful status fetch.
 
     Rules:
     - Auth invalid: always send, never silent.
-    - --notify (default): always send done / not-done status.
-    - --skip-if-done: suppress the message when the daily is already solved.
+    - --notify (default): send only when the daily is still incomplete.
+    - --always: also send when the daily is already solved.
     - --silent: quiet delivery (disable_notification); never for auth errors.
     """
     bot_token, chat_id = resolve_telegram_target()
@@ -448,7 +448,7 @@ def notify_challenge(
         )
         return
 
-    if skip_if_done and challenge.is_done:
+    if challenge.is_done and not always:
         return
 
     send_telegram(
@@ -501,8 +501,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--notify",
         action="store_true",
         help=(
-            "Send a Telegram message about the result (done or not done). "
-            "Use --skip-if-done to suppress the message when already solved."
+            "Send a Telegram message when the daily is still incomplete "
+            "(and always on session/API errors). Use --always to also report "
+            "when already solved."
         ),
     )
     parser.add_argument(
@@ -514,11 +515,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--skip-if-done",
+        "--always",
         action="store_true",
         help=(
-            "With --notify: do not send Telegram when the daily is already solved. "
-            "Auth/API errors still notify. Without --notify this flag is ignored."
+            "With --notify: also send Telegram when the daily is already solved. "
+            "Without --notify this flag is ignored."
         ),
     )
     parser.add_argument(
@@ -557,9 +558,9 @@ def run(argv: list[str] | None = None) -> int:
             "Warning: --silent has no effect without --notify",
             file=sys.stderr,
         )
-    if args.skip_if_done and not args.notify:
+    if args.always and not args.notify:
         print(
-            "Warning: --skip-if-done has no effect without --notify",
+            "Warning: --always has no effect without --notify",
             file=sys.stderr,
         )
 
@@ -592,7 +593,7 @@ def run(argv: list[str] | None = None) -> int:
             notify_challenge(
                 challenge,
                 prefer_silent=args.silent,
-                skip_if_done=args.skip_if_done,
+                always=args.always,
             )
         except TelegramError as tg_exc:
             print(f"Telegram error: {tg_exc}", file=sys.stderr)
