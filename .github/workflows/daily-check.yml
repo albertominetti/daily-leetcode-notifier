@@ -8,19 +8,25 @@
 # Optional:
 #   LEETCODE_CSRFTOKEN
 #
-# Cron uses UTC. Adjust times if you want a specific local timezone.
-# Default pattern (UTC): quiet status at 10/14/18, loud incomplete alert at 23.
+# Target local times: Europe/Zurich at 10:00, 14:00, 18:00 (silent) and 23:00 (alert).
+# GitHub Actions cron only supports UTC, so we schedule every UTC hour that can map
+# to those Zurich times under CET (UTC+1) or CEST (UTC+2), then filter by local hour.
 
 name: Daily LeetCode check
 
 on:
   schedule:
-    # Quiet status checks (Telegram --notify --silent)
-    - cron: "0 10 * * *" # 10:00 UTC
-    - cron: "0 14 * * *" # 14:00 UTC
-    - cron: "0 18 * * *" # 18:00 UTC
-    # Loud alert only if the daily is still open
-    - cron: "0 23 * * *" # 23:00 UTC
+    # UTC times that can be 10/14/18/23 in Europe/Zurich (CET or CEST)
+    # CET  (UTC+1): 09, 13, 17, 22 UTC
+    # CEST (UTC+2): 08, 12, 16, 21 UTC
+    - cron: "0 8 * * *"
+    - cron: "0 9 * * *"
+    - cron: "0 12 * * *"
+    - cron: "0 13 * * *"
+    - cron: "0 16 * * *"
+    - cron: "0 17 * * *"
+    - cron: "0 21 * * *"
+    - cron: "0 22 * * *"
   workflow_dispatch:
     inputs:
       silent:
@@ -39,6 +45,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  TZ: Europe/Zurich
+
 jobs:
   check:
     name: Check daily challenge
@@ -46,44 +55,47 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install uv
-        # Pin a release tag (floating @v8 does not resolve). Node 24 runtime.
-        uses: astral-sh/setup-uv@v8.3.2
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install
-
-      - name: Sync project
-        run: uv sync
-
-      - name: Decide notify flags
-        id: flags
+      - name: Resolve Europe/Zurich schedule slot
+        id: slot
         shell: bash
         run: |
           set -euo pipefail
 
+          # Ensure zoneinfo is available for TZ=Europe/Zurich
+          export TZ=Europe/Zurich
+          NOW="$(date '+%Y-%m-%d %H:%M %Z')"
+          HOUR="$(date '+%H')"
+          echo "Local time (Europe/Zurich): $NOW (hour=$HOUR)"
+
+          SHOULD_RUN="false"
           NOTIFY="true"
           SILENT="true"
+          REASON=""
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SHOULD_RUN="true"
             NOTIFY="${{ inputs.notify }}"
             SILENT="${{ inputs.silent }}"
+            REASON="manual workflow_dispatch"
           else
-            # Match scheduled cron expression (UTC)
-            case "${{ github.event.schedule }}" in
-              "0 23 * * *")
+            case "$HOUR" in
+              10|14|18)
+                SHOULD_RUN="true"
+                NOTIFY="true"
+                SILENT="true"
+                REASON="Zurich ${HOUR}:00 quiet status"
+                ;;
+              23)
+                SHOULD_RUN="true"
+                NOTIFY="true"
                 SILENT="false"
+                REASON="Zurich 23:00 alert if incomplete"
                 ;;
               *)
-                SILENT="true"
+                SHOULD_RUN="false"
+                REASON="Zurich hour ${HOUR} is not a schedule slot (off-DST UTC fire) — skip"
                 ;;
             esac
-            NOTIFY="true"
           fi
 
           ARGS=()
@@ -94,11 +106,35 @@ jobs:
             fi
           fi
 
-          # shellcheck disable=SC2086
-          echo "args=${ARGS[*]-}" >> "$GITHUB_OUTPUT"
-          echo "Resolved flags: ${ARGS[*]-}"
+          {
+            echo "should_run=$SHOULD_RUN"
+            echo "reason=$REASON"
+            echo "args=${ARGS[*]-}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "should_run=$SHOULD_RUN reason=$REASON flags=${ARGS[*]-}"
+
+      - name: Checkout
+        if: steps.slot.outputs.should_run == 'true'
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        if: steps.slot.outputs.should_run == 'true'
+        # Pin a release tag (floating @v8 does not resolve). Node 24 runtime.
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        if: steps.slot.outputs.should_run == 'true'
+        run: uv python install
+
+      - name: Sync project
+        if: steps.slot.outputs.should_run == 'true'
+        run: uv sync
 
       - name: Run check_daily.py
+        if: steps.slot.outputs.should_run == 'true'
         env:
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           LEETCODE_CSRFTOKEN: ${{ secrets.LEETCODE_CSRFTOKEN }}
@@ -111,11 +147,15 @@ jobs:
         run: |
           set +e
           # shellcheck disable=SC2086
-          uv run check_daily.py ${{ steps.flags.outputs.args }}
+          uv run check_daily.py ${{ steps.slot.outputs.args }}
           code=$?
           set -e
-          echo "Exit code: $code"
+          echo "Exit code: $code (${{ steps.slot.outputs.reason }})"
           if [ "$code" -eq 2 ]; then
             exit 2
           fi
           exit 0
+
+      - name: Skipped (not a Zurich target hour)
+        if: steps.slot.outputs.should_run != 'true'
+        run: echo "Skipped — ${{ steps.slot.outputs.reason }}"
