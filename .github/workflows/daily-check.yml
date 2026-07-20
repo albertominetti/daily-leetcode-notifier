@@ -10,26 +10,33 @@
 #
 # Four runs only. Cron is UTC; times below match Europe/Zurich in winter (CET,
 # UTC+1). In summer (CEST, UTC+2) they fire one hour later local time.
+#
+# Scheduled runs use --skip-if-done so completed dailies stay quiet.
+# Manual workflow_dispatch can always notify (skip_if_done input, default false).
 
 name: Daily LeetCode check
 
 on:
   schedule:
     # Europe/Zurich wall times under CET (UTC+1)
-    - cron: "0 9 * * *" # 10:00 Zurich — quiet
-    - cron: "0 13 * * *" # 14:00 Zurich — quiet
-    - cron: "0 17 * * *" # 18:00 Zurich — quiet
-    - cron: "0 22 * * *" # 23:00 Zurich — alert if incomplete
+    - cron: "0 9 * * *" # 10:00 Zurich — quiet if open
+    - cron: "0 13 * * *" # 14:00 Zurich — quiet if open
+    - cron: "0 17 * * *" # 18:00 Zurich — quiet if open
+    - cron: "0 22 * * *" # 23:00 Zurich — alert if open
   workflow_dispatch:
     inputs:
-      silent:
-        description: "Use silent Telegram delivery (disable_notification)"
-        type: boolean
-        default: true
       notify:
         description: "Send Telegram notification"
         type: boolean
         default: true
+      silent:
+        description: "Quiet Telegram delivery (disable_notification)"
+        type: boolean
+        default: false
+      skip_if_done:
+        description: "Skip Telegram when the daily is already solved"
+        type: boolean
+        default: false
 
 concurrency:
   group: daily-leetcode-check
@@ -72,12 +79,14 @@ jobs:
 
           NOTIFY="true"
           SILENT="true"
+          SKIP_IF_DONE="true"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             NOTIFY="${{ inputs.notify }}"
             SILENT="${{ inputs.silent }}"
+            SKIP_IF_DONE="${{ inputs.skip_if_done }}"
           else
-            # Night slot (23:00 Zurich / 22:00 UTC under CET)
+            # Night slot (23:00 Zurich / 22:00 UTC under CET): sound if open
             case "${{ github.event.schedule }}" in
               "0 22 * * *")
                 SILENT="false"
@@ -87,6 +96,7 @@ jobs:
                 ;;
             esac
             NOTIFY="true"
+            SKIP_IF_DONE="true"
           fi
 
           ARGS=()
@@ -94,6 +104,9 @@ jobs:
             ARGS+=(--notify)
             if [ "$SILENT" = "true" ]; then
               ARGS+=(--silent)
+            fi
+            if [ "$SKIP_IF_DONE" = "true" ]; then
+              ARGS+=(--skip-if-done)
             fi
           fi
 

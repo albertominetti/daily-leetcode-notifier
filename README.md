@@ -17,7 +17,9 @@ Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dep
 - Daily problem info (title, difficulty, link, optional tags)
 - Completion check for the authenticated user
 - Telegram messages with HTML formatting (done / not done / session errors)
-- `--silent` for quiet reminders when the daily is still open (no message if already done)
+- `--notify` always sends Telegram status (done **or** not done)
+- `--silent` for quiet delivery (no sound); independent of completion
+- `--skip-if-done` to suppress Telegram when the daily is already solved (for cron)
 - Auth and API failures **always alert** (never silent)
 - Zero pip packages; works offline once `uv` has a Python interpreter
 - **GitHub Actions** schedule with secrets stored in the repository
@@ -91,10 +93,10 @@ GitHub Actions `cron` is **always UTC**. The workflow uses **four** UTC times th
 
 | Europe/Zurich (CET) | UTC cron | Flags | Intent |
 |---------------------|----------|-------|--------|
-| **10:00** | `0 9 * * *` | `--notify --silent` | Quiet reminder only if not done |
-| **14:00** | `0 13 * * *` | `--notify --silent` | Quiet reminder only if not done |
-| **18:00** | `0 17 * * *` | `--notify --silent` | Quiet reminder only if not done |
-| **23:00** | `0 22 * * *` | `--notify` | Sound alert only if not done |
+| **10:00** | `0 9 * * *` | `--notify --silent --skip-if-done` | Quiet if still open |
+| **14:00** | `0 13 * * *` | `--notify --silent --skip-if-done` | Quiet if still open |
+| **18:00** | `0 17 * * *` | `--notify --silent --skip-if-done` | Quiet if still open |
+| **23:00** | `0 22 * * *` | `--notify --skip-if-done` | Sound if still open |
 
 > **Note:** GitHub can delay scheduled jobs by a few minutes. For exact local time on your machine, use system cron.
 
@@ -105,7 +107,8 @@ GitHub Actions `cron` is **always UTC**. The workflow uses **four** UTC times th
 Inputs:
 
 - **notify** — send Telegram (default on)
-- **silent** — quiet delivery (default on)
+- **silent** — quiet delivery (default **off** — you get a normal alert)
+- **skip_if_done** — skip when already solved (default **off** — always send status)
 
 ### 5. Job success vs “not done”
 
@@ -138,11 +141,15 @@ uv run check_daily.py --tags
 # JSON (for scripts)
 uv run check_daily.py --json
 
-# Telegram — quiet reminder only if still not done
+# Telegram — always send status (done or not done), with sound
+uv run check_daily.py --notify
+
+# Telegram — always send status, quietly
 uv run check_daily.py --notify --silent
 
-# Telegram — alert with sound only if still not done
-uv run check_daily.py --notify
+# Telegram — only if still incomplete (for cron)
+uv run check_daily.py --notify --silent --skip-if-done
+uv run check_daily.py --notify --skip-if-done
 ```
 
 Or with system Python (no deps to install):
@@ -159,19 +166,20 @@ python3 check_daily.py --env-file .env
 | `--csrf VALUE` | Override CSRF cookie |
 | `--json` | Machine-readable JSON |
 | `--tags` | Include topic tags (hidden by default) |
-| `--notify` | Send a Telegram message |
-| `--silent` | With `--notify`: if still open, quiet delivery (`disable_notification`). **No message if already done.** Auth/API errors always alert |
+| `--notify` | Always send a Telegram status (done **or** not done) |
+| `--silent` | With `--notify`: quiet delivery (`disable_notification`). Auth/API errors always alert |
+| `--skip-if-done` | With `--notify`: do **not** send when the daily is already solved |
 | `--env-file PATH` | Env file to load (default: `.env`) |
 | `--quiet-ok` | Suppress stdout when the daily is already done |
 
 ### Notification rules
 
-| Situation | `--notify --silent` | `--notify` |
-|-----------|---------------------|------------|
-| Daily **done** | *No message* | *No message* |
-| Daily **not done** | Silent “NOT DONE” | **Alert** (sound) |
-| Session invalid | **Alert** (never silent) | **Alert** |
-| API / network error | **Alert** (never silent) | **Alert** |
+| Situation | `--notify` | `--notify --silent` | `… --skip-if-done` |
+|-----------|------------|---------------------|--------------------|
+| Daily **done** | Message + sound | Message, quiet | *No message* |
+| Daily **not done** | Message + sound | Message, quiet | Same as without skip |
+| Session invalid | **Alert** | **Alert** | **Alert** |
+| API / network error | **Alert** | **Alert** | **Alert** |
 
 ### Exit codes
 
@@ -192,24 +200,23 @@ The script does **not** hardcode times. You choose when it runs via **cron**, **
 
 | Local time | Flags | Intent |
 |------------|-------|--------|
-| **10:00** | `--notify --silent` | Quiet reminder **only if not done** |
-| **14:00** | `--notify --silent` | Quiet reminder **only if not done** |
-| **18:00** | `--notify --silent` | Quiet reminder **only if not done** |
-| **23:00** | `--notify` | Last call: **only if not done**, with sound |
+| **10:00** | `--notify --silent --skip-if-done` | Quiet if still open |
+| **14:00** | `--notify --silent --skip-if-done` | Quiet if still open |
+| **18:00** | `--notify --silent --skip-if-done` | Quiet if still open |
+| **23:00** | `--notify --skip-if-done` | Sound if still open |
 
-**Why silent earlier and loud at night?**
+**Why this combo for cron?**
 
-- If the daily is already solved, **no Telegram message** at any slot.
-- During the day, incomplete dailies get a quiet nudge.
-- Late evening, incomplete dailies get a real alert.
-- Session/cookie problems always alert with sound (even with `--silent`).
+- Manual `--notify` always reports status (done or not).
+- Cron adds `--skip-if-done` so completed dailies stay quiet.
+- Daytime uses `--silent`; night does not (sound if still open).
+- Session/cookie problems always alert with sound.
 
 ```text
         10:00          14:00          18:00          23:00
           |              |              |              |
           v              v              v              v
      quiet if open  quiet if open  quiet if open  alert if open
-     (skip if done) (skip if done) (skip if done) (skip if done)
 ```
 
 ### Example crontab
@@ -219,21 +226,21 @@ Replace `PROJECT` with your clone path and `UV` with `which uv` (or use a full p
 ```cron
 # Daily LeetCode notifier (machine local timezone)
 # Quiet status through the day
-0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent
-0 14 * * * cd PROJECT && UV run check_daily.py --notify --silent
-0 18 * * * cd PROJECT && UV run check_daily.py --notify --silent
+0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent --skip-if-done
+0 14 * * * cd PROJECT && UV run check_daily.py --notify --silent --skip-if-done
+0 18 * * * cd PROJECT && UV run check_daily.py --notify --silent --skip-if-done
 
 # Night: sound only if the daily is still incomplete
-0 23 * * * cd PROJECT && UV run check_daily.py --notify
+0 23 * * * cd PROJECT && UV run check_daily.py --notify --skip-if-done
 ```
 
 Concrete example:
 
 ```cron
-0 10 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-0 14 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-0 18 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-0 23 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify
+0 10 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent --skip-if-done
+0 14 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent --skip-if-done
+0 18 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent --skip-if-done
+0 23 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --skip-if-done
 ```
 
 Install:
@@ -251,25 +258,23 @@ crontab -l   # verify
 **Optional logging** (not required):
 
 ```cron
-0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent >>/tmp/leetcode-daily.log 2>&1
+0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent --skip-if-done >>/tmp/leetcode-daily.log 2>&1
 ```
 
 ### Other schedules (examples)
 
-Only evenings, quiet then loud:
+Only evenings, quiet then loud (skip if done):
 
 ```cron
-0 19 * * * cd PROJECT && UV run check_daily.py --notify --silent
-0 22 * * * cd PROJECT && UV run check_daily.py --notify
+0 19 * * * cd PROJECT && UV run check_daily.py --notify --silent --skip-if-done
+0 22 * * * cd PROJECT && UV run check_daily.py --notify --skip-if-done
 ```
 
-Only alert when incomplete (no “already done” noise):
+Always report status every 4 hours (including when done):
 
 ```cron
-0 */4 * * * cd PROJECT && UV run check_daily.py --notify
+0 */4 * * * cd PROJECT && UV run check_daily.py --notify --silent
 ```
-
-(`--notify` without `--silent` skips Telegram when the daily is already done.)
 
 ---
 

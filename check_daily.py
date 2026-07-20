@@ -3,7 +3,8 @@
 Check LeetCode's daily coding challenge and whether the authenticated user
 has already solved it.
 
-Optional Telegram alerts via --notify (use --silent for quiet deliveries).
+Optional Telegram alerts via --notify (use --silent for quiet deliveries,
+--skip-if-done to suppress messages when the daily is already solved).
 Authentication errors are never sent as silent Telegram notifications.
 """
 
@@ -425,15 +426,16 @@ def notify_challenge(
     challenge: DailyChallenge,
     *,
     prefer_silent: bool,
+    skip_if_done: bool,
 ) -> None:
     """
     Send a Telegram message for a successful status fetch.
 
     Rules:
     - Auth invalid: always send, never silent.
-    - Already solved: never notify (silent or not).
-    - Not done + --silent: quiet reminder.
-    - Not done without --silent: alert with sound.
+    - --notify (default): always send done / not-done status.
+    - --skip-if-done: suppress the message when the daily is already solved.
+    - --silent: quiet delivery (disable_notification); never for auth errors.
     """
     bot_token, chat_id = resolve_telegram_target()
 
@@ -446,8 +448,7 @@ def notify_challenge(
         )
         return
 
-    # No ping once the daily is already solved
-    if challenge.is_done:
+    if skip_if_done and challenge.is_done:
         return
 
     send_telegram(
@@ -499,15 +500,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--notify",
         action="store_true",
-        help="Send a Telegram message about the result",
+        help=(
+            "Send a Telegram message about the result (done or not done). "
+            "Use --skip-if-done to suppress the message when already solved."
+        ),
     )
     parser.add_argument(
         "--silent",
         action="store_true",
         help=(
-            "With --notify: if the daily is still open, deliver quietly "
-            "(disable_notification). Skips Telegram entirely when already done. "
+            "With --notify: deliver quietly (disable_notification). "
             "Auth/API errors are never silent. Without --notify this flag is ignored."
+        ),
+    )
+    parser.add_argument(
+        "--skip-if-done",
+        action="store_true",
+        help=(
+            "With --notify: do not send Telegram when the daily is already solved. "
+            "Auth/API errors still notify. Without --notify this flag is ignored."
         ),
     )
     parser.add_argument(
@@ -546,6 +557,11 @@ def run(argv: list[str] | None = None) -> int:
             "Warning: --silent has no effect without --notify",
             file=sys.stderr,
         )
+    if args.skip_if_done and not args.notify:
+        print(
+            "Warning: --skip-if-done has no effect without --notify",
+            file=sys.stderr,
+        )
 
     try:
         challenge = fetch_daily_challenge(session=session, csrf=csrf)
@@ -573,7 +589,11 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.notify:
         try:
-            notify_challenge(challenge, prefer_silent=args.silent)
+            notify_challenge(
+                challenge,
+                prefer_silent=args.silent,
+                skip_if_done=args.skip_if_done,
+            )
         except TelegramError as tg_exc:
             print(f"Telegram error: {tg_exc}", file=sys.stderr)
             return 2
