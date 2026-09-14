@@ -3,7 +3,7 @@
 Small Python script that:
 
 1. Fetches **today’s LeetCode daily coding challenge**
-2. Checks whether **your account** has already solved it
+2. Checks whether **your account** has completed **today’s** daily (an old AC on the same problem does not count)
 3. Optionally sends a **Telegram** notification
 
 Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dependencies** — only the Python standard library (3.10+).
@@ -290,6 +290,8 @@ daily-leetcode-notifier/
 ├── .gitignore
 ├── LICENSE
 ├── README.md
+├── tests/
+│   └── test_check_daily.py        # completion and status-copy unit tests
 └── .github/workflows/
     └── daily-check.yml            # scheduled GitHub Action
 ```
@@ -300,8 +302,9 @@ daily-leetcode-notifier/
 
 Against LeetCode’s GraphQL API (`https://leetcode.com/graphql`):
 
-- Daily node `userStatus == Finish`, and/or
-- Problem `status == ac` for the signed-in user
+- Daily is **done** only when the daily node `userStatus == Finish`
+- Lifetime problem `status == ac` is **not** enough: an old accepted submission does not credit today’s daily challenge
+- When the problem was solved before but today’s daily is still open, status is **NOT DONE** with a “done in the past” hint (submit again for today’s credit)
 
 This tool **only reads** status. It does not submit solutions.
 
