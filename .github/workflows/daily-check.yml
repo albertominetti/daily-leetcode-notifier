@@ -13,6 +13,11 @@
 #
 # --notify only messages when the daily is still incomplete (errors always).
 # Manual runs may pass always=true to also report when already solved.
+#
+# Each run writes last-run.txt (UTC) and commits it to the checked-out
+# branch. That push is repository activity, so GitHub does not disable
+# scheduled workflows after 60 days of inactivity. There is no `on: push`
+# trigger, so the commit does not re-run this workflow.
 
 name: Daily LeetCode check
 
@@ -43,7 +48,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   check:
@@ -136,10 +141,16 @@ jobs:
           fi
           exit 0
 
-      - name: Upload run timestamp
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: last-run
-          path: last-run.txt
-          if-no-files-found: error
+      - name: Commit run timestamp
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-run.txt
+          if git diff --staged --quiet; then
+            echo "last-run.txt unchanged"
+            exit 0
+          fi
+          git commit -m "Record last workflow run timestamp"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
