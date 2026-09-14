@@ -13,11 +13,6 @@
 #
 # --notify only messages when the daily is still incomplete (errors always).
 # Manual runs may pass always=true to also report when already solved.
-#
-# Each run writes last-run.txt (UTC) and commits it to the checked-out
-# branch. That push is repository activity, so GitHub does not disable
-# scheduled workflows after 60 days of inactivity. There is no `on: push`
-# trigger, so the commit does not re-run this workflow.
 
 name: Daily LeetCode check
 
