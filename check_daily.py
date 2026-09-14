@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Check LeetCode's daily coding challenge and whether the authenticated user
-has already solved it.
+has completed today's daily (a lifetime AC on the same problem does not count).
 
 Optional Telegram alerts via --notify (incomplete by default; use --always
 to also report when done; --silent for quiet deliveries).
@@ -80,6 +80,7 @@ class DailyChallenge:
     daily_user_status: str | None  # NotStart | Finish | ...
     question_status: str | None  # ac | notac | None
     is_done: bool
+    previously_solved: bool  # lifetime AC, but today's daily is not Finish
     username: str | None
     is_signed_in: bool
 
@@ -189,18 +190,25 @@ def fetch_user_status(
     return is_signed_in, username
 
 
-def is_challenge_done(daily_user_status: str | None, question_status: str | None) -> bool:
+def is_challenge_done(daily_user_status: str | None) -> bool:
     """
-    Decide completion from authenticated fields.
+    Daily challenge is done only when LeetCode marks the daily node Finish.
 
-    Prefer the daily challenge userStatus (Finish). Fall back to the problem's
-    general status (ac) so already-solved problems still count.
+    Lifetime problem AC (question.status == ac) does not count: an old
+    submission does not credit today's daily challenge.
     """
-    if daily_user_status and daily_user_status.lower() == STATUS_FINISH.lower():
-        return True
-    if question_status and question_status.lower() == QSTATUS_AC:
-        return True
-    return False
+    return bool(
+        daily_user_status and daily_user_status.lower() == STATUS_FINISH.lower()
+    )
+
+
+def is_solved_in_the_past(
+    daily_user_status: str | None, question_status: str | None
+) -> bool:
+    """True when the problem was accepted before, but today's daily is not Finish."""
+    if is_challenge_done(daily_user_status):
+        return False
+    return bool(question_status and question_status.lower() == QSTATUS_AC)
 
 
 def fetch_daily_challenge(
@@ -226,8 +234,10 @@ def fetch_daily_challenge(
         link = link_path
 
     done = False
+    previously_solved = False
     if is_signed_in:
-        done = is_challenge_done(daily_user_status, question_status)
+        done = is_challenge_done(daily_user_status)
+        previously_solved = is_solved_in_the_past(daily_user_status, question_status)
     else:
         # Without auth, userStatus is always NotStart and is not meaningful.
         daily_user_status = None
@@ -245,6 +255,7 @@ def fetch_daily_challenge(
         daily_user_status=daily_user_status,
         question_status=question_status,
         is_done=done,
+        previously_solved=previously_solved,
         username=username,
         is_signed_in=is_signed_in,
     )
@@ -279,6 +290,11 @@ def format_human(challenge: DailyChallenge, *, show_tags: bool = False) -> str:
         lines.append(f"User:       {who}")
         if challenge.is_done:
             lines.append("Status:     DONE ✓  — daily challenge already solved")
+        elif challenge.previously_solved:
+            lines.append(
+                "Status:     NOT DONE  — done in the past; "
+                "submit again for today's daily"
+            )
         else:
             detail = challenge.daily_user_status or challenge.question_status or "NotStart"
             if challenge.question_status == QSTATUS_NOTAC:
@@ -344,6 +360,16 @@ def format_telegram_status(challenge: DailyChallenge) -> str:
             f"{problem_block}\n"
             "\n"
             f"Status: <b>DONE</b> · {who}"
+        )
+
+    if challenge.previously_solved:
+        return (
+            "❌ <b>LeetCode · Daily not done</b>\n"
+            "\n"
+            f"{problem_block}\n"
+            "\n"
+            f"Status: <b>NOT DONE</b> · done in the past · {who}\n"
+            "Submit again to get today's credit."
         )
 
     return (
@@ -474,7 +500,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Fetch today's LeetCode daily challenge and check whether you "
-            "have already solved it."
+            "have completed today's daily."
         ),
     )
     parser.add_argument(
