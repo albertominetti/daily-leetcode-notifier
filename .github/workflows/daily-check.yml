@@ -43,7 +43,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   check:
@@ -54,6 +54,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Write run timestamp
+        run: date -u +'%Y-%m-%dT%H:%M:%SZ' | tee last-run.txt
 
       - name: Install uv
         # Pin a release tag (floating @v8 does not resolve). Node 24 runtime.
@@ -132,3 +135,17 @@ jobs:
             exit 2
           fi
           exit 0
+
+      - name: Commit run timestamp
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-run.txt
+          if git diff --staged --quiet; then
+            echo "last-run.txt unchanged"
+            exit 0
+          fi
+          git commit -m "Record last workflow run timestamp"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
