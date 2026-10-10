@@ -100,7 +100,6 @@ class DailyChallenge:
     daily_user_status: str | None  # NotStart | Finish | ...
     question_status: str | None  # ac | notac | None
     is_done: bool
-    previously_solved: bool  # lifetime AC, but today's daily is not Finish
     username: str | None
     user_found: bool
     cant_verify: bool = False  # 20+ ACs today rolled off the public window
@@ -201,22 +200,18 @@ def summarize_daily_submissions(
     *,
     slug: str,
     day: str,
-) -> tuple[bool, bool, bool]:
+) -> tuple[bool, bool]:
     """
-    Verdict from public recent submissions: (done, attempted_today, ever_ac).
+    Verdict from public recent submissions: (done, attempted_today).
 
     done = Accepted submission on this problem dated today (UTC).
-    An old AC without one today does not count.
     """
     done = False
     attempted_today = False
-    ever_ac = False
     for sub in submissions:
         if not isinstance(sub, dict) or sub.get("titleSlug") != slug:
             continue
         accepted = str(sub.get("statusDisplay") or "").lower() == "accepted"
-        if accepted:
-            ever_ac = True
         if utc_day(sub.get("timestamp") or "") == day:
             if accepted:
                 done = True
@@ -224,26 +219,17 @@ def summarize_daily_submissions(
                 attempted_today = True
     if done:
         attempted_today = False
-    return done, attempted_today, ever_ac
+    return done, attempted_today
 
 
 def is_challenge_done(daily_user_status: str | None) -> bool:
     """
     Done only when the synthesized daily status is Finish, i.e. an Accepted
-    submission on today's problem dated today. An old AC alone never counts.
+    submission on today's problem dated today.
     """
     return bool(
         daily_user_status and daily_user_status.lower() == STATUS_FINISH.lower()
     )
-
-
-def is_solved_in_the_past(
-    daily_user_status: str | None, question_status: str | None
-) -> bool:
-    """True when the problem was accepted before, but today's daily is not Finish."""
-    if is_challenge_done(daily_user_status):
-        return False
-    return bool(question_status and question_status.lower() == QSTATUS_AC)
 
 
 def fetch_daily_challenge(username: str) -> DailyChallenge:
@@ -287,7 +273,6 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
             daily_user_status=None,
             question_status=None,
             is_done=False,
-            previously_solved=False,
             username=None,
             user_found=False,
             cant_verify=False,
@@ -309,7 +294,7 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
     for ac in recent_ac_list:
         subs.append({**ac, "statusDisplay": "Accepted"})
 
-    done, attempted_today, ever_ac = summarize_daily_submissions(
+    done, attempted_today = summarize_daily_submissions(
         subs, slug=title_slug, day=day
     )
 
@@ -327,9 +312,6 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
     elif attempted_today:
         daily_user_status = STATUS_NOT_START
         question_status = QSTATUS_NOTAC
-    elif ever_ac:
-        daily_user_status = STATUS_NOT_START
-        question_status = QSTATUS_AC
     else:
         daily_user_status = STATUS_NOT_START
         question_status = None
@@ -346,7 +328,6 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
         daily_user_status=daily_user_status,
         question_status=question_status,
         is_done=is_challenge_done(daily_user_status),
-        previously_solved=is_solved_in_the_past(daily_user_status, question_status),
         username=resolved,
         user_found=True,
         cant_verify=cant_verify,
@@ -386,19 +367,13 @@ def format_human(challenge: DailyChallenge, *, show_tags: bool = False) -> str:
                 "Status:     CAN'T VERIFY ⚠️  — 20+ accepted submissions today; "
                 "older submissions rolled off public history"
             )
-        elif challenge.previously_solved:
-            lines.append(
-                "Status:     NOT DONE  — done in the past; "
-                "submit again for today's daily"
-            )
         else:
-            detail = challenge.daily_user_status or challenge.question_status or "NotStart"
             if challenge.question_status == QSTATUS_NOTAC:
                 lines.append(
-                    f"Status:     NOT DONE  — attempted but not accepted ({detail})"
+                    "Status:     NOT DONE  — attempted today but not accepted"
                 )
             else:
-                lines.append(f"Status:     NOT DONE  — not solved yet ({detail})")
+                lines.append("Status:     NOT DONE  — not solved today")
 
     return "\n".join(lines)
 
@@ -467,14 +442,13 @@ def format_telegram_status(challenge: DailyChallenge) -> str:
             "Older submissions rolled off public history; verify manually on leetcode.com."
         )
 
-    if challenge.previously_solved:
+    if challenge.question_status == QSTATUS_NOTAC:
         return (
             "❌ <b>LeetCode · Daily not done</b>\n"
             "\n"
             f"{problem_block}\n"
             "\n"
-            f"Status: <b>NOT DONE</b> · done in the past · {who}\n"
-            "Submit again to get today's credit."
+            f"Status: <b>NOT DONE</b> · attempted today · {who}"
         )
 
     return (

@@ -17,7 +17,6 @@ from check_daily import (
     format_human,
     format_telegram_status,
     is_challenge_done,
-    is_solved_in_the_past,
     parse_args,
     run,
     summarize_daily_submissions,
@@ -38,7 +37,6 @@ def _challenge(**overrides: object) -> DailyChallenge:
         "daily_user_status": "NotStart",
         "question_status": None,
         "is_done": False,
-        "previously_solved": False,
         "username": "alice",
         "user_found": True,
     }
@@ -56,62 +54,43 @@ class ChallengeDoneTests(unittest.TestCase):
         self.assertFalse(is_challenge_done(None))
         self.assertFalse(is_challenge_done(""))
 
-    def test_lifetime_ac_does_not_count_as_daily(self) -> None:
-        # Old accepted submissions must not mark today's daily complete.
-        self.assertFalse(is_challenge_done("NotStart"))
-        self.assertTrue(is_solved_in_the_past("NotStart", "ac"))
-        self.assertTrue(is_solved_in_the_past("NotStart", "AC"))
-
-    def test_finish_is_not_solved_in_the_past(self) -> None:
-        self.assertFalse(is_solved_in_the_past("Finish", "ac"))
-
-    def test_never_solved_is_not_solved_in_the_past(self) -> None:
-        self.assertFalse(is_solved_in_the_past("NotStart", None))
-        self.assertFalse(is_solved_in_the_past("NotStart", "notac"))
-
 
 class StatusCopyTests(unittest.TestCase):
-    def test_human_hints_done_in_the_past(self) -> None:
+    def test_human_attempted_today(self) -> None:
         text = format_human(
             _challenge(
                 daily_user_status="NotStart",
-                question_status="ac",
+                question_status="notac",
                 is_done=False,
-                previously_solved=True,
             )
         )
         self.assertIn("NOT DONE", text)
-        self.assertIn("done in the past", text)
-        self.assertIn("submit again for today's daily", text)
+        self.assertIn("attempted today but not accepted", text)
 
-    def test_telegram_hints_done_in_the_past(self) -> None:
+    def test_telegram_attempted_today(self) -> None:
         text = format_telegram_status(
             _challenge(
                 daily_user_status="NotStart",
-                question_status="ac",
+                question_status="notac",
                 is_done=False,
-                previously_solved=True,
             )
         )
         self.assertIn("Daily not done", text)
-        self.assertIn("done in the past", text)
-        self.assertIn("Submit again to get today's credit.", text)
+        self.assertIn("attempted today", text)
 
-    def test_human_never_solved_has_no_past_hint(self) -> None:
+    def test_human_not_solved_today(self) -> None:
         text = format_human(_challenge())
         self.assertIn("NOT DONE", text)
-        self.assertIn("not solved yet", text)
-        self.assertNotIn("done in the past", text)
+        self.assertIn("not solved today", text)
 
-    def test_done_status_has_no_past_hint(self) -> None:
+    def test_done_status(self) -> None:
         challenge = _challenge(
             daily_user_status="Finish",
             question_status="ac",
             is_done=True,
-            previously_solved=False,
         )
-        self.assertNotIn("done in the past", format_human(challenge))
-        self.assertNotIn("done in the past", format_telegram_status(challenge))
+        self.assertIn("DONE ✓", format_human(challenge))
+        self.assertIn("Daily done", format_telegram_status(challenge))
 
     def test_cant_verify_warning_in_outputs(self) -> None:
         challenge = _challenge(
@@ -155,35 +134,35 @@ class PublicCheckTests(unittest.TestCase):
         subs = [self._sub(status="Wrong Answer"), self._sub(status="Accepted")]
         self.assertEqual(
             summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
-            (True, False, True),
+            (True, False),
         )
 
     def test_attempted_today_without_accept(self) -> None:
         subs = [self._sub(status="Wrong Answer")]
         self.assertEqual(
             summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
-            (False, True, False),
+            (False, True),
         )
 
     def test_old_accept_only_is_not_done(self) -> None:
         subs = [self._sub(day="2026-10-09", status="Accepted")]
         self.assertEqual(
             summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
-            (False, False, True),
+            (False, False),
         )
 
     def test_other_problems_ignored(self) -> None:
         subs = [self._sub(slug="three-sum", status="Accepted")]
         self.assertEqual(
             summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
-            (False, False, False),
+            (False, False),
         )
 
     def test_malformed_entries_ignored(self) -> None:
         subs = ["junk", {"titleSlug": self.SLUG}, {"titleSlug": self.SLUG, "timestamp": "xx"}]
         self.assertEqual(
             summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
-            (False, False, False),
+            (False, False),
         )
 
     def test_username_flag(self) -> None:

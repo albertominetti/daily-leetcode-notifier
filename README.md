@@ -299,11 +299,11 @@ daily-leetcode-notifier/
 
 Against LeetCode’s public GraphQL API (`https://leetcode.com/graphql`):
 
-1. Fetches today's challenge from `activeDailyCodingChallengeQuestion`
-2. Fetches the user's recent submissions from `recentSubmissionList(username: ...)`
+1. Fetches today's challenge from `activeDailyCodingChallengeQuestion` (its problem slug and UTC date)
+2. Fetches the user's recent submissions from `recentSubmissionList` and `recentAcSubmissionList`
 3. Daily is **done** only when an **Accepted** submission on today's problem exists with a timestamp on **today's UTC date**
-4. Lifetime problem acceptance is **not** enough: an old accepted submission does not credit today's daily challenge
-5. When the problem was solved in the past but not yet today, status is **NOT DONE** with a “done in the past” hint (submit again for today’s credit)
+4. If no accepted submission occurred today, status is **NOT DONE**
+5. If 20+ accepted submissions occurred today and the daily wasn't among them, status is **CAN'T VERIFY ⚠️** (the public history buffer overflowed)
 
 This tool **only reads** public status. It does not submit solutions and requires no login or session cookies.
 
