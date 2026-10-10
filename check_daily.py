@@ -3,10 +3,14 @@
 Check LeetCode's daily coding challenge and whether the authenticated user
 has completed today's daily (a lifetime AC on the same problem does not count).
 
-Auth is username/password only (LEETCODE_USERNAME / LEETCODE_PASSWORD):
-every run logs in once via https://leetcode.com/accounts/login/ and uses
-the fresh session in-memory. No session is ever stored — not in .env,
-not in GitHub secrets.
+Auth is username/password only (LEETCODE_USERNAME / LEETCODE_PASSWORD).
+The session is never configured — it lives in a local cache file
+(`.leetcode_session.json`, owner-only permissions) and is reused while
+valid; a fresh login happens only when the cached session is rejected.
+
+LeetCode allows ~2 parallel sessions, so run the check in ONE place only
+(server cron XOR GitHub Actions): the checker holds one slot, your browser
+holds the other. Running both checkers leaves no slot for the browser.
 
 Optional Telegram alerts via --notify (incomplete by default; use --always
 to also report when done; --silent for quiet deliveries).
@@ -353,6 +357,44 @@ def login_with_password(
         raise LoginError(f"Network error on login POST: {exc.reason}") from exc
 
 
+DEFAULT_SESSION_FILE = ".leetcode_session.json"
+
+
+def load_cached_session(path: Path) -> tuple[str | None, str | None]:
+    """Load (session, csrf) from a JSON cache file; (None, None) if unusable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    session = data.get("session")
+    csrf = data.get("csrf")
+    if not session or not isinstance(session, str):
+        return None, None
+    if not isinstance(csrf, str):
+        csrf = None
+    return session, csrf
+
+
+def save_cached_session(path: Path, session: str, csrf: str | None) -> None:
+    """Persist (session, csrf) as JSON with owner-only (0600) permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"session": session, "csrf": csrf}, fh)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+
 def is_challenge_done(daily_user_status: str | None) -> bool:
     """
     Daily challenge is done only when LeetCode marks the daily node Finish.
@@ -672,6 +714,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="LeetCode username/email (default: $LEETCODE_USERNAME)",
     )
     parser.add_argument(
+        "--session-file",
+        default=os.environ.get("LEETCODE_SESSION_FILE", DEFAULT_SESSION_FILE),
+        help=(
+            "Session cache file (default: $LEETCODE_SESSION_FILE or "
+            f"{DEFAULT_SESSION_FILE}). Reused while valid; login only "
+            "when rejected. Empty string disables the cache."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON instead of human text",
@@ -731,6 +782,7 @@ def run(argv: list[str] | None = None) -> int:
     username = args.username or os.environ.get("LEETCODE_USERNAME")
     # Password is env-only on purpose: CLI args are visible via `ps`.
     password = os.environ.get("LEETCODE_PASSWORD")
+    session_file = Path(args.session_file) if args.session_file else None
 
     if args.silent and not args.notify:
         print(
@@ -743,44 +795,62 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    if not username or not password:
-        print(
-            "Error: LEETCODE_USERNAME and LEETCODE_PASSWORD must be set "
-            "(env or .env); no session is stored.",
-            file=sys.stderr,
-        )
+    def _fail_auth(message: str) -> int:
+        print(f"Error: {message}", file=sys.stderr)
         if args.notify:
             try:
-                notify_error("Missing LEETCODE_USERNAME/LEETCODE_PASSWORD")
+                notify_error(message)
             except TelegramError as tg_exc:
                 print(f"Telegram error: {tg_exc}", file=sys.stderr)
                 return 2
         return 3
 
-    # Fresh password login on every run; the session lives in-memory only.
-    try:
-        session, csrf = login_with_password(username, password)
-    except LoginError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        if args.notify:
+    # Reuse the cached session while LeetCode still accepts it, so a run
+    # normally costs zero of the ~2 parallel session slots.
+    challenge = None
+    if session_file is not None:
+        session, csrf = load_cached_session(session_file)
+        if session:
             try:
-                notify_error(str(exc))
-            except TelegramError as tg_exc:
-                print(f"Telegram error: {tg_exc}", file=sys.stderr)
+                challenge = fetch_daily_challenge(session=session, csrf=csrf)
+            except LeetCodeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                if args.notify:
+                    try:
+                        notify_error(str(exc))
+                    except TelegramError as tg_exc:
+                        print(f"Telegram error: {tg_exc}", file=sys.stderr)
+                        return 2
                 return 2
-        return 3
+            if not challenge.is_signed_in:
+                challenge = None  # cache rejected → fresh login below
 
-    try:
-        challenge = fetch_daily_challenge(session=session, csrf=csrf)
-    except LeetCodeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        if args.notify:
+    if challenge is None:
+        if not username or not password:
+            return _fail_auth(
+                "Cached session rejected and LEETCODE_USERNAME / "
+                "LEETCODE_PASSWORD are not set (env or .env)."
+            )
+        try:
+            session, csrf = login_with_password(username, password)
+        except LoginError as exc:
+            return _fail_auth(str(exc))
+        if session_file is not None:
             try:
-                notify_error(str(exc))
-            except TelegramError as tg_exc:
-                print(f"Telegram error: {tg_exc}", file=sys.stderr)
-                return 2
-        return 2
+                save_cached_session(session_file, session, csrf)
+            except OSError as exc:
+                print(f"Warning: cannot save session cache: {exc}", file=sys.stderr)
+        try:
+            challenge = fetch_daily_challenge(session=session, csrf=csrf)
+        except LeetCodeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            if args.notify:
+                try:
+                    notify_error(str(exc))
+                except TelegramError as tg_exc:
+                    print(f"Telegram error: {tg_exc}", file=sys.stderr)
+                    return 2
+            return 2
 
     suppress_stdout = (
         args.quiet_ok and challenge.is_signed_in and challenge.is_done

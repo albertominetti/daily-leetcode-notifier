@@ -56,8 +56,9 @@ cp .env.example .env
 | `TELEGRAM_BOT_TOKEN` | For `--notify` | Bot token from [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | For `--notify` | Your user or group chat id |
 
-**Local:** put them in `.env` (gitignored). No session is stored anywhere:
-every run logs in with username/password and keeps the session in-memory.
+**Local:** put them in `.env` (gitignored). The session is cached in
+`.leetcode_session.json` (gitignored, owner-only permissions) and reused
+while valid — a fresh login happens only when it is rejected.
 
 **Telegram:** create a bot with BotFather, send `/start` to the bot, then resolve your chat id (e.g. [@userinfobot](https://t.me/userinfobot) or `getUpdates`).
 
@@ -68,6 +69,13 @@ every run logs in with username/password and keeps the session in-memory.
 Workflow file: [`.github/workflows/daily-check.yml`](.github/workflows/daily-check.yml)
 
 Runs the same check on GitHub-hosted runners and sends Telegram messages using **repository secrets** (never commit tokens to the repo).
+
+> **Run in ONE place only.** LeetCode allows ~2 parallel sessions: the
+> checker holds one stable session (cached in `.leetcode_session.json`,
+> reused while valid), your browser holds the other. Running **both** this
+> workflow **and** server cron leaves no slot for the browser — you'll be
+> signed out there. Pick one: disable the workflow (**Actions → ⋯ → Disable
+> workflow**) or remove the crontab.
 
 ### 1. Add repository secrets
 
@@ -82,10 +90,10 @@ In your GitHub repo:
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat id |
 
-> **No session stored:** on a Linux server, credentials live in `.env`; on
-> GitHub runners, everything comes from repository secrets (there is no
-> `.env` there). Either way, every run logs in fresh and keeps the session
-> in-memory only.
+> **No session in secrets:** on a Linux server, credentials live in `.env`;
+> on GitHub runners, everything comes from repository secrets (there is no
+> `.env` there). The session itself is cached in `.leetcode_session.json`
+> (local file / Actions cache) and reused while valid.
 
 ### 2. Enable Actions
 
@@ -167,6 +175,7 @@ python3 check_daily.py --env-file .env
 | Flag | Meaning |
 |------|---------|
 | `--username VALUE` | Override `LEETCODE_USERNAME` (password stays env-only) |
+| `--session-file PATH` | Session cache file (default: `.leetcode_session.json`); empty disables caching |
 | `--json` | Machine-readable JSON |
 | `--tags` | Include topic tags (hidden by default) |
 | `--notify` | Send Telegram when incomplete (login/API errors always) |
@@ -198,6 +207,9 @@ python3 check_daily.py --env-file .env
 ## Scheduling with cron (local examples)
 
 The script does **not** hardcode times. You choose when it runs via **cron**, **GitHub Actions** (see above), or systemd timers. Below is one sensible daily pattern for a machine crontab (local timezone).
+
+> **ONE place only:** if the GitHub workflow is active, don't also run cron
+> (LeetCode allows ~2 parallel sessions — checker + browser).
 
 ### Suggested logic
 

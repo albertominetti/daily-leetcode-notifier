@@ -20,9 +20,11 @@ from check_daily import (
     format_telegram_status,
     is_challenge_done,
     is_solved_in_the_past,
+    load_cached_session,
     login_with_password,
     parse_args,
     run,
+    save_cached_session,
 )
 
 
@@ -148,6 +150,7 @@ class PasswordLoginTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             env_file = str(Path(tmp) / ".env")
+            session_file = str(Path(tmp) / "session.json")
             clean = {
                 k: v
                 for k, v in os.environ.items()
@@ -155,14 +158,95 @@ class PasswordLoginTests(unittest.TestCase):
                 not in (
                     "LEETCODE_USERNAME",
                     "LEETCODE_PASSWORD",
-                    "LEETCODE_SESSION",
-                    "LEETCODE_CSRFTOKEN",
-                    "CSRFTOKEN",
+                    "LEETCODE_SESSION_FILE",
                 )
             }
             with mock.patch.dict(os.environ, clean, clear=True):
-                code = run(["--env-file", env_file])
+                code = run(
+                    ["--env-file", env_file, "--session-file", session_file]
+                )
         self.assertEqual(code, 3)
+
+    def test_session_cache_roundtrip(self) -> None:
+        import os
+        import stat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "sub" / "session.json"
+            self.assertEqual(load_cached_session(p), (None, None))
+            save_cached_session(p, "sess123", "csrf456")
+            self.assertEqual(load_cached_session(p), ("sess123", "csrf456"))
+            mode = stat.S_IMODE(os.stat(p).st_mode)
+            self.assertEqual(mode, 0o600)
+            p.write_text("not json", encoding="utf-8")
+            self.assertEqual(load_cached_session(p), (None, None))
+
+    def test_run_reuses_valid_cache_without_login(self) -> None:
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = str(Path(tmp) / ".env")
+            session_file = str(Path(tmp) / "session.json")
+            save_cached_session(Path(session_file), "cached", "csrf")
+            clean = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("LEETCODE_USERNAME", "LEETCODE_PASSWORD")
+            }
+            with (
+                mock.patch.dict(os.environ, clean, clear=True),
+                mock.patch(
+                    "check_daily.fetch_daily_challenge", return_value=_challenge()
+                ) as fetch,
+                mock.patch("check_daily.login_with_password") as login,
+            ):
+                code = run(
+                    ["--env-file", env_file, "--session-file", session_file]
+                )
+            self.assertEqual(code, 1)  # signed in, not done
+            fetch.assert_called_once_with(session="cached", csrf="csrf")
+            login.assert_not_called()
+
+    def test_run_logs_in_when_cache_rejected(self) -> None:
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = str(Path(tmp) / ".env")
+            session_file = str(Path(tmp) / "session.json")
+            save_cached_session(Path(session_file), "stale", None)
+            dead = _challenge(is_signed_in=False, username=None)
+            fresh = _challenge()
+            with mock.patch.dict(
+                os.environ,
+                {"LEETCODE_USERNAME": "u", "LEETCODE_PASSWORD": "p"},
+                clear=True,
+            ):
+                with (
+                    mock.patch(
+                        "check_daily.fetch_daily_challenge",
+                        side_effect=[dead, fresh],
+                    ) as fetch,
+                    mock.patch(
+                        "check_daily.login_with_password",
+                        return_value=("new", "csrf2"),
+                    ) as login,
+                ):
+                    code = run(
+                        [
+                            "--env-file",
+                            env_file,
+                            "--session-file",
+                            session_file,
+                        ]
+                    )
+            self.assertEqual(code, 1)
+            login.assert_called_once_with("u", "p")
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(
+                load_cached_session(Path(session_file)), ("new", "csrf2")
+            )
 
 
 if __name__ == "__main__":

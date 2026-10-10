@@ -19,6 +19,7 @@ htmlcov/
 .env.*
 !.env.example
 .evn
+.leetcode_session.json
 
 # Local logs / runtime
 *.log

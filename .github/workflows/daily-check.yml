@@ -6,10 +6,14 @@
 #   TELEGRAM_BOT_TOKEN
 #   TELEGRAM_CHAT_ID
 #
-# Auth is username/password only: every run logs in once via
-# https://leetcode.com/accounts/login/ and uses the fresh session
-# in-memory. No session is stored anywhere — not in secrets, not in .env.
+# Auth is username/password only: runs reuse the cached
+# .leetcode_session.json (Actions cache) while valid and log in fresh only
+# when it is rejected. No session in secrets.
 # Requires email/username + password login (no SSO/2FA/captcha).
+#
+# IMPORTANT: LeetCode allows ~2 parallel sessions. Run the check in ONE
+# place only (this workflow XOR server cron): the checker holds one slot,
+# your browser holds the other. Running both signs the browser out.
 #
 # Four runs only. Cron is UTC; times below match Europe/Zurich in winter (CET,
 # UTC+1). In summer (CEST, UTC+2) they fire one hour later local time.
@@ -57,6 +61,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Restore LeetCode session cache
+        # Best-effort persistence for .leetcode_session.json so runs reuse
+        # one stable session instead of logging in (and burning one of the
+        # ~2 parallel LeetCode sessions) every time. Miss → fresh login.
+        uses: actions/cache/restore@v4
+        with:
+          path: .leetcode_session.json
+          key: leetcode-session-${{ github.run_id }}
+          restore-keys: |
+            leetcode-session-
 
       - name: Write run timestamp
         run: date -u +'%Y-%m-%dT%H:%M:%SZ' | tee last-run.txt
@@ -138,6 +153,16 @@ jobs:
             exit 2
           fi
           exit 0
+
+      - name: Save LeetCode session cache
+        # Only when the script actually wrote one (first-ever/expired runs
+        # may have none). Run-scoped key: each run stores its latest file,
+        # restore-keys picks the newest available next time.
+        if: always() && hashFiles('.leetcode_session.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .leetcode_session.json
+          key: leetcode-session-${{ github.run_id }}
 
       - name: Commit run timestamp
         if: success() || failure()
