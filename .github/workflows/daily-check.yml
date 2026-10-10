@@ -7,6 +7,13 @@
 #
 # Optional:
 #   LEETCODE_CSRFTOKEN
+#   LEETCODE_USERNAME / LEETCODE_PASSWORD — password auto-refresh fallback.
+#     When the LEETCODE_SESSION secret is expired, the run logs in once via
+#     https://leetcode.com/accounts/login/ and uses the fresh session
+#     in-memory for that run only (runners are ephemeral, and a workflow
+#     cannot update its own secrets). Re-login happens on every run until
+#     you manually refresh the LEETCODE_SESSION secret. No SSO/2FA/captcha.
+#     Never pass --save-session here: there is no persistent .env in CI.
 #
 # Four runs only. Cron is UTC; times below match Europe/Zurich in winter (CET,
 # UTC+1). In summer (CEST, UTC+2) they fire one hour later local time.
@@ -120,14 +127,24 @@ jobs:
         env:
           LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
           LEETCODE_CSRFTOKEN: ${{ secrets.LEETCODE_CSRFTOKEN }}
+          LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+          LEETCODE_PASSWORD: ${{ secrets.LEETCODE_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         # Exit codes: 0 done, 1 not done, 2 error, 3 not signed in.
         # Fail the job only on hard errors (2).
+        # No --save-session in CI: the runner is ephemeral (no persistent
+        # .env) and a workflow cannot update its own secrets. A refreshed
+        # session is used in-memory for that run only.
         run: |
           set +e
+          EXTRA_ARGS=()
+          if [ -n "${LEETCODE_USERNAME:-}" ] && [ -n "${LEETCODE_PASSWORD:-}" ]; then
+            EXTRA_ARGS+=(--auto-refresh)
+            echo "Password auto-refresh enabled (secrets present)"
+          fi
           # shellcheck disable=SC2086
-          uv run check_daily.py ${{ steps.flags.outputs.args }}
+          uv run check_daily.py ${{ steps.flags.outputs.args }} "${EXTRA_ARGS[@]}"
           code=$?
           set -e
           echo "Exit code: $code"

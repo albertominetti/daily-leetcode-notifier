@@ -82,6 +82,18 @@ In your GitHub repo:
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat id |
 | `LEETCODE_CSRFTOKEN` | *(optional)* CSRF cookie |
+| `LEETCODE_USERNAME` | *(optional)* LeetCode username/email — auto-refresh fallback |
+| `LEETCODE_PASSWORD` | *(optional)* LeetCode password — auto-refresh fallback |
+
+> **Session auto-refresh:** on a Linux server, credentials live in `.env`
+> (`LEETCODE_USERNAME` / `LEETCODE_PASSWORD`, plus `--auto-refresh
+> --save-session` to persist the refreshed cookie back to `.env`). There is
+> no `.env` on GitHub runners — the workflow reads everything from repository
+> secrets instead. When `LEETCODE_USERNAME` and `LEETCODE_PASSWORD` secrets
+> are set, an expired `LEETCODE_SESSION` secret is refreshed in-memory for
+> that run only; the secrets themselves are never rewritten, so update the
+> `LEETCODE_SESSION` secret manually when you get a chance. Never use
+> `--save-session` in CI.
 
 ### 2. Enable Actions
 
