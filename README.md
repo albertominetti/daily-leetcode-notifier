@@ -174,6 +174,7 @@ python3 check_daily.py --env-file .env
 |-----------|------------|---------------------|---------------------|
 | Daily **done** | *No message* | *No message* | Message (+ sound unless `--silent`) |
 | Daily **not done** | Message + sound | Message, quiet | Same |
+| **Can't verify** (20+ ACs today) | Message + sound | Message, quiet | Same |
 | User lookup error | **Alert** | **Alert** | **Alert** |
 | API / network error | **Alert** | **Alert** | **Alert** |
 
@@ -182,7 +183,7 @@ python3 check_daily.py --env-file .env
 | Code | Meaning |
 |------|---------|
 | `0` | Daily is **done** |
-| `1` | Daily is **not done** |
+| `1` | Daily is **not done** (or can't verify) |
 | `2` | LeetCode / Telegram / network error |
 | `3` | Username missing (cannot evaluate completion) |
 

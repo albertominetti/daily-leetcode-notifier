@@ -113,6 +113,21 @@ class StatusCopyTests(unittest.TestCase):
         self.assertNotIn("done in the past", format_human(challenge))
         self.assertNotIn("done in the past", format_telegram_status(challenge))
 
+    def test_cant_verify_warning_in_outputs(self) -> None:
+        challenge = _challenge(
+            is_done=False,
+            cant_verify=True,
+            daily_user_status=None,
+            question_status=None,
+        )
+        human = format_human(challenge)
+        self.assertIn("CAN'T VERIFY", human)
+        self.assertIn("20+ accepted submissions today", human)
+
+        tg = format_telegram_status(challenge)
+        self.assertIn("Can't verify", tg)
+        self.assertIn("20+ ACs today", tg)
+
 
 class PublicCheckTests(unittest.TestCase):
     DAY = "2026-10-10"
@@ -250,6 +265,43 @@ class PublicCheckTests(unittest.TestCase):
             c = check_daily.fetch_daily_challenge("bob")
         self.assertTrue(c.is_done)
         self.assertEqual(c.daily_user_status, "Finish")
+        self.assertFalse(c.cant_verify)
+
+    def test_cant_verify_when_20_or_more_acs_today(self) -> None:
+        from unittest import mock
+
+        import check_daily
+
+        fake_daily = {
+            "activeDailyCodingChallengeQuestion": {
+                "date": "2026-10-10",
+                "question": {
+                    "questionFrontendId": "1",
+                    "title": "Two Sum",
+                    "titleSlug": "two-sum",
+                    "difficulty": "Easy",
+                    "acRate": 50.0,
+                    "topicTags": [],
+                },
+            }
+        }
+        # 20 accepted submissions today, all on DIFFERENT problems
+        twenty_acs = [
+            {"titleSlug": f"problem-{i}", "timestamp": "1791633600"}
+            for i in range(20)
+        ]
+        fake_user = {
+            "matchedUser": {"username": "bob"},
+            "recentSubmissionList": [
+                {**s, "statusDisplay": "Accepted"} for s in twenty_acs
+            ],
+            "recentAcSubmissionList": twenty_acs,
+        }
+
+        with mock.patch("check_daily.graphql", side_effect=[fake_daily, fake_user]):
+            c = check_daily.fetch_daily_challenge("bob")
+        self.assertFalse(c.is_done)
+        self.assertTrue(c.cant_verify)
 
 
 if __name__ == "__main__":

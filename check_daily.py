@@ -103,6 +103,7 @@ class DailyChallenge:
     previously_solved: bool  # lifetime AC, but today's daily is not Finish
     username: str | None
     user_found: bool
+    cant_verify: bool = False  # 20+ ACs today rolled off the public window
 
 
 class LeetCodeError(RuntimeError):
@@ -289,7 +290,15 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
             previously_solved=False,
             username=None,
             user_found=False,
+            cant_verify=False,
         )
+
+    recent_ac_list = [
+        s for s in (recent.get("recentAcSubmissionList") or []) if isinstance(s, dict)
+    ]
+    today_ac_count = sum(
+        1 for s in recent_ac_list if utc_day(s.get("timestamp") or "") == day
+    )
 
     subs: list[dict[str, Any]] = [
         s for s in (recent.get("recentSubmissionList") or []) if isinstance(s, dict)
@@ -297,15 +306,24 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
     # Also merge recentAcSubmissionList: ensures a flurry of non-accepted
     # attempts on other problems does not push today's accepted daily out of
     # the 20-item window.
-    for ac in recent.get("recentAcSubmissionList") or []:
-        if isinstance(ac, dict):
-            subs.append({**ac, "statusDisplay": "Accepted"})
+    for ac in recent_ac_list:
+        subs.append({**ac, "statusDisplay": "Accepted"})
+
     done, attempted_today, ever_ac = summarize_daily_submissions(
         subs, slug=title_slug, day=day
     )
+
+    cant_verify = False
     if done:
         daily_user_status: str | None = STATUS_FINISH
         question_status: str | None = QSTATUS_AC
+    elif len(recent_ac_list) >= 20 and today_ac_count >= 20:
+        # If the user has 20 or more Accepted submissions today and the daily
+        # wasn't among them, older submissions from earlier today have rolled
+        # off the 20-item public window: we cannot verify whether it was done.
+        cant_verify = True
+        daily_user_status = None
+        question_status = None
     elif attempted_today:
         daily_user_status = STATUS_NOT_START
         question_status = QSTATUS_NOTAC
@@ -331,6 +349,7 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
         previously_solved=is_solved_in_the_past(daily_user_status, question_status),
         username=resolved,
         user_found=True,
+        cant_verify=cant_verify,
     )
 
 
@@ -362,6 +381,11 @@ def format_human(challenge: DailyChallenge, *, show_tags: bool = False) -> str:
         lines.append(f"User:       {who}")
         if challenge.is_done:
             lines.append("Status:     DONE ✓  — daily challenge already solved")
+        elif challenge.cant_verify:
+            lines.append(
+                "Status:     CAN'T VERIFY ⚠️  — 20+ accepted submissions today; "
+                "older submissions rolled off public history"
+            )
         elif challenge.previously_solved:
             lines.append(
                 "Status:     NOT DONE  — done in the past; "
@@ -431,6 +455,16 @@ def format_telegram_status(challenge: DailyChallenge) -> str:
             f"{problem_block}\n"
             "\n"
             f"Status: <b>DONE</b> · {who}"
+        )
+
+    if challenge.cant_verify:
+        return (
+            "⚠️ <b>LeetCode · Can't verify</b>\n"
+            "\n"
+            f"{problem_block}\n"
+            "\n"
+            f"Status: <b>CAN'T VERIFY</b> · 20+ ACs today · {who}\n"
+            "Older submissions rolled off public history; verify manually on leetcode.com."
         )
 
     if challenge.previously_solved:
