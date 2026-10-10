@@ -15,16 +15,17 @@ if str(_ROOT) not in sys.path:
 from check_daily import (
     DailyChallenge,
     LoginError,
+    LogoutError,
     extract_cookie_value,
     format_human,
     format_telegram_status,
     is_challenge_done,
     is_solved_in_the_past,
-    load_cached_session,
     login_with_password,
+    logout_quietly,
+    logout_session,
     parse_args,
     run,
-    save_cached_session,
 )
 
 
@@ -137,12 +138,13 @@ class PasswordLoginTests(unittest.TestCase):
             login_with_password("user", "")
 
     def test_no_session_flags(self) -> None:
-        # No session is stored: these options must not exist anymore.
+        # No session is configured or cached: these options must not exist.
         args = parse_args([])
         self.assertFalse(hasattr(args, "session"))
         self.assertFalse(hasattr(args, "csrf"))
         self.assertFalse(hasattr(args, "auto_refresh"))
         self.assertFalse(hasattr(args, "save_session"))
+        self.assertFalse(hasattr(args, "session_file"))
 
     def test_run_without_credentials_returns_3(self) -> None:
         import os
@@ -150,45 +152,6 @@ class PasswordLoginTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             env_file = str(Path(tmp) / ".env")
-            session_file = str(Path(tmp) / "session.json")
-            clean = {
-                k: v
-                for k, v in os.environ.items()
-                if k
-                not in (
-                    "LEETCODE_USERNAME",
-                    "LEETCODE_PASSWORD",
-                    "LEETCODE_SESSION_FILE",
-                )
-            }
-            with mock.patch.dict(os.environ, clean, clear=True):
-                code = run(
-                    ["--env-file", env_file, "--session-file", session_file]
-                )
-        self.assertEqual(code, 3)
-
-    def test_session_cache_roundtrip(self) -> None:
-        import os
-        import stat
-
-        with tempfile.TemporaryDirectory() as tmp:
-            p = Path(tmp) / "sub" / "session.json"
-            self.assertEqual(load_cached_session(p), (None, None))
-            save_cached_session(p, "sess123", "csrf456")
-            self.assertEqual(load_cached_session(p), ("sess123", "csrf456"))
-            mode = stat.S_IMODE(os.stat(p).st_mode)
-            self.assertEqual(mode, 0o600)
-            p.write_text("not json", encoding="utf-8")
-            self.assertEqual(load_cached_session(p), (None, None))
-
-    def test_run_reuses_valid_cache_without_login(self) -> None:
-        import os
-        from unittest import mock
-
-        with tempfile.TemporaryDirectory() as tmp:
-            env_file = str(Path(tmp) / ".env")
-            session_file = str(Path(tmp) / "session.json")
-            save_cached_session(Path(session_file), "cached", "csrf")
             clean = {
                 k: v
                 for k, v in os.environ.items()
@@ -196,28 +159,18 @@ class PasswordLoginTests(unittest.TestCase):
             }
             with (
                 mock.patch.dict(os.environ, clean, clear=True),
-                mock.patch(
-                    "check_daily.fetch_daily_challenge", return_value=_challenge()
-                ) as fetch,
                 mock.patch("check_daily.login_with_password") as login,
             ):
-                code = run(
-                    ["--env-file", env_file, "--session-file", session_file]
-                )
-            self.assertEqual(code, 1)  # signed in, not done
-            fetch.assert_called_once_with(session="cached", csrf="csrf")
+                code = run(["--env-file", env_file])
+            self.assertEqual(code, 3)
             login.assert_not_called()
 
-    def test_run_logs_in_when_cache_rejected(self) -> None:
+    def test_run_logs_in_checks_out_and_logs_out(self) -> None:
         import os
         from unittest import mock
 
         with tempfile.TemporaryDirectory() as tmp:
             env_file = str(Path(tmp) / ".env")
-            session_file = str(Path(tmp) / "session.json")
-            save_cached_session(Path(session_file), "stale", None)
-            dead = _challenge(is_signed_in=False, username=None)
-            fresh = _challenge()
             with mock.patch.dict(
                 os.environ,
                 {"LEETCODE_USERNAME": "u", "LEETCODE_PASSWORD": "p"},
@@ -225,28 +178,61 @@ class PasswordLoginTests(unittest.TestCase):
             ):
                 with (
                     mock.patch(
+                        "check_daily.login_with_password",
+                        return_value=("sess", "csrf"),
+                    ) as login,
+                    mock.patch(
                         "check_daily.fetch_daily_challenge",
-                        side_effect=[dead, fresh],
+                        return_value=_challenge(),
                     ) as fetch,
+                    mock.patch("check_daily.logout_session") as logout,
+                ):
+                    code = run(["--env-file", env_file])
+            self.assertEqual(code, 1)  # signed in, not done
+            login.assert_called_once_with("u", "p")
+            fetch.assert_called_once_with(session="sess", csrf="csrf")
+            logout.assert_called_once_with("sess", "csrf")
+
+    def test_run_logs_out_even_when_check_fails(self) -> None:
+        import os
+        from unittest import mock
+
+        from check_daily import LeetCodeError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = str(Path(tmp) / ".env")
+            with mock.patch.dict(
+                os.environ,
+                {"LEETCODE_USERNAME": "u", "LEETCODE_PASSWORD": "p"},
+                clear=True,
+            ):
+                with (
                     mock.patch(
                         "check_daily.login_with_password",
-                        return_value=("new", "csrf2"),
-                    ) as login,
+                        return_value=("sess", "csrf"),
+                    ),
+                    mock.patch(
+                        "check_daily.fetch_daily_challenge",
+                        side_effect=LeetCodeError("boom"),
+                    ),
+                    mock.patch("check_daily.logout_session") as logout,
                 ):
-                    code = run(
-                        [
-                            "--env-file",
-                            env_file,
-                            "--session-file",
-                            session_file,
-                        ]
-                    )
-            self.assertEqual(code, 1)
-            login.assert_called_once_with("u", "p")
-            self.assertEqual(fetch.call_count, 2)
-            self.assertEqual(
-                load_cached_session(Path(session_file)), ("new", "csrf2")
-            )
+                    code = run(["--env-file", env_file])
+            self.assertEqual(code, 2)
+            logout.assert_called_once_with("sess", "csrf")
+
+    def test_logout_failure_never_fails_run(self) -> None:
+        from unittest import mock
+
+        with mock.patch(
+            "check_daily.logout_session", side_effect=LogoutError("nope")
+        ):
+            # Must not raise: logout is best-effort.
+            logout_quietly("sess", "csrf")
+        # Empty session is a no-op (also must not raise / call out).
+        with mock.patch("check_daily.logout_session") as logout:
+            logout_quietly(None, None)
+            logout.assert_not_called()
 
 
 if __name__ == "__main__":

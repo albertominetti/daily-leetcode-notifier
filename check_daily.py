@@ -4,13 +4,16 @@ Check LeetCode's daily coding challenge and whether the authenticated user
 has completed today's daily (a lifetime AC on the same problem does not count).
 
 Auth is username/password only (LEETCODE_USERNAME / LEETCODE_PASSWORD).
-The session is never configured — it lives in a local cache file
-(`.leetcode_session.json`, owner-only permissions) and is reused while
-valid; a fresh login happens only when the cached session is rejected.
+Every run does login → check → logout: the worker holds a LeetCode
+session slot only for seconds, so a Linux server worker, a GitHub Actions
+worker, and your browser coexist within LeetCode's ~2 parallel sessions.
+Nothing is stored — not in .env, not in secrets, not in a cache file.
 
-LeetCode allows ~2 parallel sessions, so run the check in ONE place only
-(server cron XOR GitHub Actions): the checker holds one slot, your browser
-holds the other. Running both checkers leaves no slot for the browser.
+Logout is best-effort (warns only); if it ever fails the run still
+reports correctly and the stale session expires on its own.
+
+Stagger the two workers by a few minutes so their second-long windows
+never overlap.
 
 Optional Telegram alerts via --notify (incomplete by default; use --always
 to also report when done; --silent for quiet deliveries).
@@ -33,6 +36,7 @@ from typing import Any
 LEETCODE_GRAPHQL = "https://leetcode.com/graphql"
 LEETCODE_ORIGIN = "https://leetcode.com"
 LEETCODE_LOGIN_URL = "https://leetcode.com/accounts/login/"
+LEETCODE_LOGOUT_URL = "https://leetcode.com/accounts/logout/"
 TELEGRAM_API = "https://api.telegram.org"
 
 BROWSER_UA = (
@@ -357,42 +361,74 @@ def login_with_password(
         raise LoginError(f"Network error on login POST: {exc.reason}") from exc
 
 
-DEFAULT_SESSION_FILE = ".leetcode_session.json"
+class LogoutError(RuntimeError):
+    """Raised when the best-effort logout fails (never fatal to a run)."""
 
 
-def load_cached_session(path: Path) -> tuple[str | None, str | None]:
-    """Load (session, csrf) from a JSON cache file; (None, None) if unusable."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None, None
-    if not isinstance(data, dict):
-        return None, None
-    session = data.get("session")
-    csrf = data.get("csrf")
-    if not session or not isinstance(session, str):
-        return None, None
-    if not isinstance(csrf, str):
-        csrf = None
-    return session, csrf
+def logout_session(
+    session: str,
+    csrf: str | None,
+    *,
+    timeout: float = 15.0,
+) -> None:
+    """
+    Best-effort logout: invalidate the session created by login_with_password
+    so the worker frees its parallel-session slot immediately.
 
+    Tries POST (Django-style, CSRF form + cookies), then GET as a fallback.
+    Raises LogoutError on failure — callers must treat this as a warning,
+    never as a run failure (the check itself already succeeded).
+    """
+    if not session:
+        return
+    cookies = [f"LEETCODE_SESSION={session}"]
+    if csrf:
+        cookies.append(f"csrftoken={csrf}")
+    base_headers = {
+        "User-Agent": BROWSER_UA,
+        "Origin": LEETCODE_ORIGIN,
+        "Referer": LEETCODE_LOGIN_URL,
+        "Cookie": "; ".join(cookies),
+    }
 
-def save_cached_session(path: Path, session: str, csrf: str | None) -> None:
-    """Persist (session, csrf) as JSON with owner-only (0600) permissions."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"session": session, "csrf": csrf}, fh)
-    except BaseException:
+    if csrf:
+        form = urllib.parse.urlencode({"csrfmiddlewaretoken": csrf}).encode()
+        post_req = urllib.request.Request(
+            LEETCODE_LOGOUT_URL,
+            data=form,
+            method="POST",
+            headers={**base_headers, "Content-Type": "application/x-www-form-urlencoded"},
+        )
         try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+            with urllib.request.urlopen(post_req, timeout=timeout):
+                return
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (405, 403, 404):
+                raise LogoutError(f"Logout POST HTTP {exc.code}") from exc
+            # Fall through to GET fallback below.
+        except urllib.error.URLError as exc:
+            raise LogoutError(f"Network error on logout: {exc.reason}") from exc
+
+    get_req = urllib.request.Request(
+        LEETCODE_LOGOUT_URL, method="GET", headers=base_headers
+    )
+    try:
+        with urllib.request.urlopen(get_req, timeout=timeout):
+            return
+    except urllib.error.HTTPError as exc:
+        raise LogoutError(f"Logout GET HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise LogoutError(f"Network error on logout: {exc.reason}") from exc
+
+
+def logout_quietly(session: str | None, csrf: str | None) -> None:
+    """Logout without ever raising: failures become a stderr warning."""
+    if not session:
+        return
+    try:
+        logout_session(session, csrf)
+    except LogoutError as exc:
+        print(f"Warning: logout failed, session may linger: {exc}", file=sys.stderr)
 
 
 def is_challenge_done(daily_user_status: str | None) -> bool:
@@ -714,15 +750,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="LeetCode username/email (default: $LEETCODE_USERNAME)",
     )
     parser.add_argument(
-        "--session-file",
-        default=os.environ.get("LEETCODE_SESSION_FILE", DEFAULT_SESSION_FILE),
-        help=(
-            "Session cache file (default: $LEETCODE_SESSION_FILE or "
-            f"{DEFAULT_SESSION_FILE}). Reused while valid; login only "
-            "when rejected. Empty string disables the cache."
-        ),
-    )
-    parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON instead of human text",
@@ -782,7 +809,6 @@ def run(argv: list[str] | None = None) -> int:
     username = args.username or os.environ.get("LEETCODE_USERNAME")
     # Password is env-only on purpose: CLI args are visible via `ps`.
     password = os.environ.get("LEETCODE_PASSWORD")
-    session_file = Path(args.session_file) if args.session_file else None
 
     if args.silent and not args.notify:
         print(
@@ -805,52 +831,31 @@ def run(argv: list[str] | None = None) -> int:
                 return 2
         return 3
 
-    # Reuse the cached session while LeetCode still accepts it, so a run
-    # normally costs zero of the ~2 parallel session slots.
-    challenge = None
-    if session_file is not None:
-        session, csrf = load_cached_session(session_file)
-        if session:
-            try:
-                challenge = fetch_daily_challenge(session=session, csrf=csrf)
-            except LeetCodeError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                if args.notify:
-                    try:
-                        notify_error(str(exc))
-                    except TelegramError as tg_exc:
-                        print(f"Telegram error: {tg_exc}", file=sys.stderr)
-                        return 2
-                return 2
-            if not challenge.is_signed_in:
-                challenge = None  # cache rejected → fresh login below
+    if not username or not password:
+        return _fail_auth(
+            "LEETCODE_USERNAME and LEETCODE_PASSWORD must be set (env or .env)."
+        )
 
-    if challenge is None:
-        if not username or not password:
-            return _fail_auth(
-                "Cached session rejected and LEETCODE_USERNAME / "
-                "LEETCODE_PASSWORD are not set (env or .env)."
-            )
-        try:
-            session, csrf = login_with_password(username, password)
-        except LoginError as exc:
-            return _fail_auth(str(exc))
-        if session_file is not None:
-            try:
-                save_cached_session(session_file, session, csrf)
-            except OSError as exc:
-                print(f"Warning: cannot save session cache: {exc}", file=sys.stderr)
+    # Login → check → logout, so the worker holds a session slot only for
+    # seconds and never competes with your browser (or the other worker).
+    try:
+        session, csrf = login_with_password(username, password)
+    except LoginError as exc:
+        return _fail_auth(str(exc))
+    try:
         try:
             challenge = fetch_daily_challenge(session=session, csrf=csrf)
-        except LeetCodeError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            if args.notify:
-                try:
-                    notify_error(str(exc))
-                except TelegramError as tg_exc:
-                    print(f"Telegram error: {tg_exc}", file=sys.stderr)
-                    return 2
-            return 2
+        finally:
+            logout_quietly(session, csrf)
+    except LeetCodeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        if args.notify:
+            try:
+                notify_error(str(exc))
+            except TelegramError as tg_exc:
+                print(f"Telegram error: {tg_exc}", file=sys.stderr)
+                return 2
+        return 2
 
     suppress_stdout = (
         args.quiet_ok and challenge.is_signed_in and challenge.is_done

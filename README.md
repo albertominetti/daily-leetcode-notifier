@@ -56,9 +56,8 @@ cp .env.example .env
 | `TELEGRAM_BOT_TOKEN` | For `--notify` | Bot token from [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | For `--notify` | Your user or group chat id |
 
-**Local:** put them in `.env` (gitignored). The session is cached in
-`.leetcode_session.json` (gitignored, owner-only permissions) and reused
-while valid — a fresh login happens only when it is rejected.
+**Local:** put them in `.env` (gitignored). Every run does login → check
+→ logout and stores nothing: the worker holds a session slot for seconds.
 
 **Telegram:** create a bot with BotFather, send `/start` to the bot, then resolve your chat id (e.g. [@userinfobot](https://t.me/userinfobot) or `getUpdates`).
 
@@ -70,12 +69,10 @@ Workflow file: [`.github/workflows/daily-check.yml`](.github/workflows/daily-che
 
 Runs the same check on GitHub-hosted runners and sends Telegram messages using **repository secrets** (never commit tokens to the repo).
 
-> **Run in ONE place only.** LeetCode allows ~2 parallel sessions: the
-> checker holds one stable session (cached in `.leetcode_session.json`,
-> reused while valid), your browser holds the other. Running **both** this
-> workflow **and** server cron leaves no slot for the browser — you'll be
-> signed out there. Pick one: disable the workflow (**Actions → ⋯ → Disable
-> workflow**) or remove the crontab.
+> **Two workers welcome.** LeetCode allows ~2 parallel sessions, and each
+> run holds a slot for seconds only (login → check → logout), so this
+> workflow, a server cron, and your browser coexist fine. Just stagger the
+> workers by a few minutes so their second-long windows never overlap.
 
 ### 1. Add repository secrets
 
@@ -90,10 +87,10 @@ In your GitHub repo:
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat id |
 
-> **No session in secrets:** on a Linux server, credentials live in `.env`;
-> on GitHub runners, everything comes from repository secrets (there is no
-> `.env` there). The session itself is cached in `.leetcode_session.json`
-> (local file / Actions cache) and reused while valid.
+> **Nothing stored:** on a Linux server, credentials live in `.env`; on
+> GitHub runners, everything comes from repository secrets (there is no
+> `.env` there). No session is kept anywhere — each run logs in, checks,
+> and logs out again.
 
 ### 2. Enable Actions
 
@@ -175,7 +172,6 @@ python3 check_daily.py --env-file .env
 | Flag | Meaning |
 |------|---------|
 | `--username VALUE` | Override `LEETCODE_USERNAME` (password stays env-only) |
-| `--session-file PATH` | Session cache file (default: `.leetcode_session.json`); empty disables caching |
 | `--json` | Machine-readable JSON |
 | `--tags` | Include topic tags (hidden by default) |
 | `--notify` | Send Telegram when incomplete (login/API errors always) |
@@ -208,17 +204,18 @@ python3 check_daily.py --env-file .env
 
 The script does **not** hardcode times. You choose when it runs via **cron**, **GitHub Actions** (see above), or systemd timers. Below is one sensible daily pattern for a machine crontab (local timezone).
 
-> **ONE place only:** if the GitHub workflow is active, don't also run cron
-> (LeetCode allows ~2 parallel sessions — checker + browser).
+> **Stagger the workers:** the GitHub workflow fires on the hour, so run
+> cron at `:07` — the two workers then never hold session slots at the same
+> moment (each run takes seconds), and your browser is never evicted.
 
 ### Suggested logic
 
 | Local time | Flags | Intent |
 |------------|-------|--------|
-| **10:00** | `--notify --silent` | Quiet if still open |
-| **14:00** | `--notify --silent` | Quiet if still open |
-| **18:00** | `--notify --silent` | Quiet if still open |
-| **23:00** | `--notify` | Sound if still open |
+| **10:07** | `--notify --silent` | Quiet if still open |
+| **14:07** | `--notify --silent` | Quiet if still open |
+| **18:07** | `--notify --silent` | Quiet if still open |
+| **23:07** | `--notify` | Sound if still open |
 
 **Why this combo for cron?**
 
@@ -228,10 +225,10 @@ The script does **not** hardcode times. You choose when it runs via **cron**, **
 - Login problems always alert with sound.
 
 ```text
-        10:00          14:00          18:00          23:00
-          |              |              |              |
-          v              v              v              v
-     quiet if open  quiet if open  quiet if open  alert if open
+        10:07          14:07          18:07          23:07
+           |              |              |              |
+           v              v              v              v
+      quiet if open  quiet if open  quiet if open  alert if open
 ```
 
 ### Example crontab
@@ -240,22 +237,23 @@ Replace `PROJECT` with your clone path and `UV` with `which uv` (or use a full p
 
 ```cron
 # Daily LeetCode notifier (machine local timezone)
+# :07 offset keeps clear of the GitHub workflow's on-the-hour runs
 # Quiet status through the day
-0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent
-0 14 * * * cd PROJECT && UV run check_daily.py --notify --silent
-0 18 * * * cd PROJECT && UV run check_daily.py --notify --silent
+7 10 * * * cd PROJECT && UV run check_daily.py --notify --silent
+7 14 * * * cd PROJECT && UV run check_daily.py --notify --silent
+7 18 * * * cd PROJECT && UV run check_daily.py --notify --silent
 
 # Night: sound only if the daily is still incomplete
-0 23 * * * cd PROJECT && UV run check_daily.py --notify
+7 23 * * * cd PROJECT && UV run check_daily.py --notify
 ```
 
 Concrete example:
 
 ```cron
-0 10 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-0 14 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-0 18 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-0 23 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify
+7 10 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
+7 14 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
+7 18 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
+7 23 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify
 ```
 
 Install:
@@ -273,7 +271,7 @@ crontab -l   # verify
 **Optional logging** (not required):
 
 ```cron
-0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent >>/tmp/leetcode-daily.log 2>&1
+7 10 * * * cd PROJECT && UV run check_daily.py --notify --silent >>/tmp/leetcode-daily.log 2>&1
 ```
 
 ### Other schedules (examples)
