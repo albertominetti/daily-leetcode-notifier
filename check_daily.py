@@ -3,14 +3,14 @@
 Check LeetCode's daily coding challenge and whether the authenticated user
 has completed today's daily (a lifetime AC on the same problem does not count).
 
+Auth is username/password only (LEETCODE_USERNAME / LEETCODE_PASSWORD):
+every run logs in once via https://leetcode.com/accounts/login/ and uses
+the fresh session in-memory. No session is ever stored — not in .env,
+not in GitHub secrets.
+
 Optional Telegram alerts via --notify (incomplete by default; use --always
 to also report when done; --silent for quiet deliveries).
 Authentication errors always notify and are never silent.
-
-Optional password auto-refresh via --auto-refresh (LEETCODE_USERNAME /
-LEETCODE_PASSWORD): when the session is invalid, log in once via
-https://leetcode.com/accounts/login/ to obtain a fresh LEETCODE_SESSION.
-Fails loudly on captcha/Cloudflare — then refresh the cookie manually.
 """
 
 from __future__ import annotations
@@ -301,7 +301,7 @@ def login_with_password(
         if exc.code == 403:
             raise LoginError(
                 "Login page blocked (403 Cloudflare/captcha). "
-                "Refresh LEETCODE_SESSION manually."
+                "Check LEETCODE_USERNAME/LEETCODE_PASSWORD and retry later."
             ) from exc
         raise LoginError(f"Login page HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
@@ -346,34 +346,11 @@ def login_with_password(
         if exc.code == 403:
             raise LoginError(
                 "Login blocked (403 Cloudflare/captcha). "
-                "Refresh LEETCODE_SESSION manually."
+                "Check LEETCODE_USERNAME/LEETCODE_PASSWORD and retry later."
             ) from exc
         raise LoginError(f"Login POST HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise LoginError(f"Network error on login POST: {exc.reason}") from exc
-
-
-def update_dotenv_value(path: Path, key: str, value: str) -> None:
-    """Upsert KEY=VALUE in a .env file (creates parent dirs as needed)."""
-    lines: list[str] = []
-    if path.is_file():
-        lines = path.read_text(encoding="utf-8").splitlines()
-    found = False
-    for i, raw in enumerate(lines):
-        stripped = raw.strip()
-        if stripped.startswith(f"{key}="):
-            lines[i] = f"{key}={value}"
-            found = True
-            break
-    if not found:
-        if lines and lines[-1].strip():
-            lines.append(f"{key}={value}")
-        elif not lines:
-            lines = [f"{key}={value}"]
-        else:
-            lines.append(f"{key}={value}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def is_challenge_done(daily_user_status: str | None) -> bool:
@@ -465,11 +442,11 @@ def format_human(challenge: DailyChallenge, *, show_tags: bool = False) -> str:
 
     if not challenge.is_signed_in:
         lines.append("User:       (not signed in)")
-        lines.append("Status:     UNKNOWN — set LEETCODE_SESSION to check completion")
+        lines.append("Status:     UNKNOWN — login did not stick")
         lines.append("")
         lines.append(
-            "Tip: copy the LEETCODE_SESSION cookie from your browser while "
-            "logged into leetcode.com and export it, or put it in a .env file."
+            "Tip: check LEETCODE_USERNAME/LEETCODE_PASSWORD "
+            "in your .env file or environment."
         )
     else:
         who = challenge.username or "(signed in)"
@@ -529,14 +506,14 @@ def format_telegram_status(challenge: DailyChallenge) -> str:
 
     if not challenge.is_signed_in:
         return (
-            "⚠️ <b>LeetCode · Session invalid</b>\n"
+            "⚠️ <b>LeetCode · Login failed</b>\n"
             "\n"
-            "Your <code>LEETCODE_SESSION</code> cookie is missing, expired, "
-            "or not accepted.\n"
+            "Password login did not produce a signed-in session.\n"
             "\n"
             f"{problem_block}\n"
             "\n"
-            "👉 Refresh the cookie in <code>.env</code> and re-run."
+            "👉 Check <code>LEETCODE_USERNAME</code> / "
+            "<code>LEETCODE_PASSWORD</code> and re-run."
         )
 
     if challenge.is_done:
@@ -690,14 +667,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--session",
-        default=os.environ.get("LEETCODE_SESSION"),
-        help="LEETCODE_SESSION cookie value (default: $LEETCODE_SESSION)",
-    )
-    parser.add_argument(
-        "--csrf",
-        default=os.environ.get("LEETCODE_CSRFTOKEN") or os.environ.get("CSRFTOKEN"),
-        help="Optional csrftoken cookie (default: $LEETCODE_CSRFTOKEN)",
+        "--username",
+        default=os.environ.get("LEETCODE_USERNAME"),
+        help="LeetCode username/email (default: $LEETCODE_USERNAME)",
     )
     parser.add_argument(
         "--json",
@@ -744,58 +716,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Exit 0 with no stdout when the daily is already done (for cron)",
     )
-    parser.add_argument(
-        "--username",
-        default=os.environ.get("LEETCODE_USERNAME"),
-        help="LeetCode username for --auto-refresh (default: $LEETCODE_USERNAME)",
-    )
-    parser.add_argument(
-        "--auto-refresh",
-        action="store_true",
-        default=os.environ.get("LEETCODE_AUTO_REFRESH", "").lower()
-        in ("1", "true", "yes", "on"),
-        help=(
-            "When not signed in, try password login with LEETCODE_USERNAME / "
-            "LEETCODE_PASSWORD to refresh LEETCODE_SESSION once. "
-            "Enable via flag or LEETCODE_AUTO_REFRESH=1."
-        ),
-    )
-    parser.add_argument(
-        "--save-session",
-        action="store_true",
-        default=os.environ.get("LEETCODE_SAVE_SESSION", "").lower()
-        in ("1", "true", "yes", "on"),
-        help=(
-            "With --auto-refresh: upsert the refreshed LEETCODE_SESSION "
-            "(and csrftoken) into --env-file. Enable via flag or "
-            "LEETCODE_SAVE_SESSION=1. In CI update the secret instead."
-        ),
-    )
     return parser.parse_args(argv)
 
 
 def run(argv: list[str] | None = None) -> int:
     """Run the CLI and return a process exit code."""
-    # Load .env before argparse defaults re-read env in parse_args path:
-    # we load first, then parse so --session still wins over env.
+    # Load .env before argparse defaults read env, so --username still wins.
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--env-file", default=".env")
     pre_args, _remaining = pre.parse_known_args(argv)
     load_dotenv(Path(pre_args.env_file))
 
     args = parse_args(argv)
-    # Re-bind session/csrf after dotenv load if CLI did not override
-    session = args.session or os.environ.get("LEETCODE_SESSION")
-    csrf = (
-        args.csrf
-        or os.environ.get("LEETCODE_CSRFTOKEN")
-        or os.environ.get("CSRFTOKEN")
-    )
     username = args.username or os.environ.get("LEETCODE_USERNAME")
+    # Password is env-only on purpose: CLI args are visible via `ps`.
     password = os.environ.get("LEETCODE_PASSWORD")
-    auto_refresh = bool(args.auto_refresh) or bool(
-        os.environ.get("LEETCODE_AUTO_REFRESH", "").lower() in ("1", "true", "yes", "on")
-    )
 
     if args.silent and not args.notify:
         print(
@@ -808,6 +743,33 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if not username or not password:
+        print(
+            "Error: LEETCODE_USERNAME and LEETCODE_PASSWORD must be set "
+            "(env or .env); no session is stored.",
+            file=sys.stderr,
+        )
+        if args.notify:
+            try:
+                notify_error("Missing LEETCODE_USERNAME/LEETCODE_PASSWORD")
+            except TelegramError as tg_exc:
+                print(f"Telegram error: {tg_exc}", file=sys.stderr)
+                return 2
+        return 3
+
+    # Fresh password login on every run; the session lives in-memory only.
+    try:
+        session, csrf = login_with_password(username, password)
+    except LoginError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        if args.notify:
+            try:
+                notify_error(str(exc))
+            except TelegramError as tg_exc:
+                print(f"Telegram error: {tg_exc}", file=sys.stderr)
+                return 2
+        return 3
+
     try:
         challenge = fetch_daily_challenge(session=session, csrf=csrf)
     except LeetCodeError as exc:
@@ -819,33 +781,6 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"Telegram error: {tg_exc}", file=sys.stderr)
                 return 2
         return 2
-
-    if not challenge.is_signed_in and auto_refresh:
-        if not username or not password:
-            print(
-                "Auto-refresh requested but LEETCODE_USERNAME/LEETCODE_PASSWORD "
-                "not set; skipping.",
-                file=sys.stderr,
-            )
-        else:
-            try:
-                session, csrf = login_with_password(username, password)
-                os.environ["LEETCODE_SESSION"] = session
-                if csrf:
-                    os.environ["LEETCODE_CSRFTOKEN"] = csrf
-                if args.save_session:
-                    env_path = Path(pre_args.env_file)
-                    update_dotenv_value(env_path, "LEETCODE_SESSION", session)
-                    if csrf:
-                        update_dotenv_value(env_path, "LEETCODE_CSRFTOKEN", csrf)
-                    print(f"Refreshed session saved to {env_path}", file=sys.stderr)
-                else:
-                    print("Session refreshed via password login.", file=sys.stderr)
-                challenge = fetch_daily_challenge(session=session, csrf=csrf)
-            except LoginError as exc:
-                print(f"Auto-refresh failed: {exc}", file=sys.stderr)
-                # Fall through with the original signed-out challenge so
-                # Telegram still sends the loud session-invalid alert.
 
     suppress_stdout = (
         args.quiet_ok and challenge.is_signed_in and challenge.is_done

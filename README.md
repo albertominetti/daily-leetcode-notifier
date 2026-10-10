@@ -8,7 +8,7 @@ Small Python script that:
 
 Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dependencies** — only the Python standard library (3.10+).
 
-> **Security:** Never commit `.env`. Treat `LEETCODE_SESSION` and `TELEGRAM_BOT_TOKEN` like passwords.
+> **Security:** Never commit `.env`. Treat `LEETCODE_PASSWORD` and `TELEGRAM_BOT_TOKEN` like passwords.
 
 ---
 
@@ -29,7 +29,7 @@ Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dep
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) (or any Python 3.10+)
-- LeetCode account + `LEETCODE_SESSION` cookie (to check *your* progress)
+- LeetCode account with username/email + password login (to check *your* progress; no SSO/2FA/captcha)
 - Telegram bot token + chat id (only if you use `--notify`)
 
 ---
@@ -51,14 +51,13 @@ cp .env.example .env
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `LEETCODE_SESSION` | Yes (for status) | Browser session cookie from leetcode.com |
-| `LEETCODE_CSRFTOKEN` | No | Optional CSRF cookie |
+| `LEETCODE_USERNAME` | Yes | LeetCode username or email (fresh login every run) |
+| `LEETCODE_PASSWORD` | Yes | LeetCode password (never stored as a session; env-only) |
 | `TELEGRAM_BOT_TOKEN` | For `--notify` | Bot token from [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | For `--notify` | Your user or group chat id |
 
-**Local:** put them in `.env` (gitignored).
-
-**LeetCode cookie:** log in at [leetcode.com](https://leetcode.com) → DevTools → Application/Storage → Cookies → copy `LEETCODE_SESSION`.
+**Local:** put them in `.env` (gitignored). No session is stored anywhere:
+every run logs in with username/password and keeps the session in-memory.
 
 **Telegram:** create a bot with BotFather, send `/start` to the bot, then resolve your chat id (e.g. [@userinfobot](https://t.me/userinfobot) or `getUpdates`).
 
@@ -78,22 +77,15 @@ In your GitHub repo:
 
 | Secret name | Value |
 |-------------|--------|
-| `LEETCODE_SESSION` | Your LeetCode session cookie |
+| `LEETCODE_USERNAME` | Your LeetCode username or email |
+| `LEETCODE_PASSWORD` | Your LeetCode password |
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat id |
-| `LEETCODE_CSRFTOKEN` | *(optional)* CSRF cookie |
-| `LEETCODE_USERNAME` | *(optional)* LeetCode username/email — auto-refresh fallback |
-| `LEETCODE_PASSWORD` | *(optional)* LeetCode password — auto-refresh fallback |
 
-> **Session auto-refresh:** on a Linux server, credentials live in `.env`
-> (`LEETCODE_USERNAME` / `LEETCODE_PASSWORD`, plus `--auto-refresh
-> --save-session` to persist the refreshed cookie back to `.env`). There is
-> no `.env` on GitHub runners — the workflow reads everything from repository
-> secrets instead. When `LEETCODE_USERNAME` and `LEETCODE_PASSWORD` secrets
-> are set, an expired `LEETCODE_SESSION` secret is refreshed in-memory for
-> that run only; the secrets themselves are never rewritten, so update the
-> `LEETCODE_SESSION` secret manually when you get a chance. Never use
-> `--save-session` in CI.
+> **No session stored:** on a Linux server, credentials live in `.env`; on
+> GitHub runners, everything comes from repository secrets (there is no
+> `.env` there). Either way, every run logs in fresh and keeps the session
+> in-memory only.
 
 ### 2. Enable Actions
 
@@ -133,8 +125,8 @@ Secrets are injected as environment variables (already done in the workflow):
 
 ```yaml
 env:
-  LEETCODE_SESSION: ${{ secrets.LEETCODE_SESSION }}
-  LEETCODE_CSRFTOKEN: ${{ secrets.LEETCODE_CSRFTOKEN }}
+  LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
+  LEETCODE_PASSWORD: ${{ secrets.LEETCODE_PASSWORD }}
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 ```
@@ -174,11 +166,10 @@ python3 check_daily.py --env-file .env
 
 | Flag | Meaning |
 |------|---------|
-| `--session VALUE` | Override `LEETCODE_SESSION` |
-| `--csrf VALUE` | Override CSRF cookie |
+| `--username VALUE` | Override `LEETCODE_USERNAME` (password stays env-only) |
 | `--json` | Machine-readable JSON |
 | `--tags` | Include topic tags (hidden by default) |
-| `--notify` | Send Telegram when incomplete (session/API errors always) |
+| `--notify` | Send Telegram when incomplete (login/API errors always) |
 | `--silent` | With `--notify`: quiet delivery (`disable_notification`). Auth/API errors always alert |
 | `--always` | With `--notify`: also send when the daily is already solved |
 | `--env-file PATH` | Env file to load (default: `.env`) |
@@ -190,7 +181,7 @@ python3 check_daily.py --env-file .env
 |-----------|------------|---------------------|---------------------|
 | Daily **done** | *No message* | *No message* | Message (+ sound unless `--silent`) |
 | Daily **not done** | Message + sound | Message, quiet | Same |
-| Session invalid | **Alert** | **Alert** | **Alert** |
+| Login failed | **Alert** | **Alert** | **Alert** |
 | API / network error | **Alert** | **Alert** | **Alert** |
 
 ### Exit codes
@@ -222,7 +213,7 @@ The script does **not** hardcode times. You choose when it runs via **cron**, **
 - `--notify` already skips when done; no extra flag needed on schedules.
 - Daytime uses `--silent`; night does not (sound if still open).
 - Use `--always` only when you want a “DONE” confirmation.
-- Session/cookie problems always alert with sound.
+- Login problems always alert with sound.
 
 ```text
         10:00          14:00          18:00          23:00
@@ -320,7 +311,9 @@ Against LeetCode’s GraphQL API (`https://leetcode.com/graphql`):
 
 This tool **only reads** status. It does not submit solutions.
 
-Session cookies expire; when Telegram says the session is invalid, refresh `LEETCODE_SESSION` in `.env`.
+Login happens fresh on every run; when Telegram reports a login failure,
+check `LEETCODE_USERNAME` / `LEETCODE_PASSWORD` (`.env` locally, repository
+secrets in CI).
 
 ---
 

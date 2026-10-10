@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from check_daily import (
     is_solved_in_the_past,
     login_with_password,
     parse_args,
-    update_dotenv_value,
+    run,
 )
 
 
@@ -114,7 +115,7 @@ class StatusCopyTests(unittest.TestCase):
         self.assertNotIn("done in the past", format_telegram_status(challenge))
 
 
-class AutoRefreshTests(unittest.TestCase):
+class PasswordLoginTests(unittest.TestCase):
     def test_extract_cookie_value(self) -> None:
         headers = [
             "csrftoken=abc123; expires=Sun, 11-Oct-2026 12:00:00 GMT; Path=/",
@@ -133,23 +134,35 @@ class AutoRefreshTests(unittest.TestCase):
         with self.assertRaises(LoginError):
             login_with_password("user", "")
 
-    def test_parse_auto_refresh_flags(self) -> None:
-        args = parse_args(["--auto-refresh", "--save-session"])
-        self.assertTrue(args.auto_refresh)
-        self.assertTrue(args.save_session)
+    def test_no_session_flags(self) -> None:
+        # No session is stored: these options must not exist anymore.
+        args = parse_args([])
+        self.assertFalse(hasattr(args, "session"))
+        self.assertFalse(hasattr(args, "csrf"))
+        self.assertFalse(hasattr(args, "auto_refresh"))
+        self.assertFalse(hasattr(args, "save_session"))
 
-    def test_update_dotenv_upserts(self) -> None:
-        import tempfile
+    def test_run_without_credentials_returns_3(self) -> None:
+        import os
+        from unittest import mock
 
         with tempfile.TemporaryDirectory() as tmp:
-            p = Path(tmp) / ".env"
-            p.write_text("LEETCODE_SESSION=old\nOTHER=1\n", encoding="utf-8")
-            update_dotenv_value(p, "LEETCODE_SESSION", "new")
-            update_dotenv_value(p, "LEETCODE_CSRFTOKEN", "csrf1")
-            text = p.read_text(encoding="utf-8")
-            self.assertIn("LEETCODE_SESSION=new", text)
-            self.assertIn("LEETCODE_CSRFTOKEN=csrf1", text)
-            self.assertIn("OTHER=1", text)
+            env_file = str(Path(tmp) / ".env")
+            clean = {
+                k: v
+                for k, v in os.environ.items()
+                if k
+                not in (
+                    "LEETCODE_USERNAME",
+                    "LEETCODE_PASSWORD",
+                    "LEETCODE_SESSION",
+                    "LEETCODE_CSRFTOKEN",
+                    "CSRFTOKEN",
+                )
+            }
+            with mock.patch.dict(os.environ, clean, clear=True):
+                code = run(["--env-file", env_file])
+        self.assertEqual(code, 3)
 
 
 if __name__ == "__main__":
