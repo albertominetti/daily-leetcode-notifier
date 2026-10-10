@@ -14,18 +14,14 @@ if str(_ROOT) not in sys.path:
 
 from check_daily import (
     DailyChallenge,
-    LoginError,
-    LogoutError,
-    extract_cookie_value,
     format_human,
     format_telegram_status,
     is_challenge_done,
     is_solved_in_the_past,
-    login_with_password,
-    logout_quietly,
-    logout_session,
     parse_args,
     run,
+    summarize_daily_submissions,
+    utc_day,
 )
 
 
@@ -44,7 +40,7 @@ def _challenge(**overrides: object) -> DailyChallenge:
         "is_done": False,
         "previously_solved": False,
         "username": "alice",
-        "is_signed_in": True,
+        "user_found": True,
     }
     data.update(overrides)
     return DailyChallenge(**data)  # type: ignore[arg-type]
@@ -118,121 +114,107 @@ class StatusCopyTests(unittest.TestCase):
         self.assertNotIn("done in the past", format_telegram_status(challenge))
 
 
-class PasswordLoginTests(unittest.TestCase):
-    def test_extract_cookie_value(self) -> None:
-        headers = [
-            "csrftoken=abc123; expires=Sun, 11-Oct-2026 12:00:00 GMT; Path=/",
-            "LEETCODE_SESSION=eyJzZXNzaW9uIjoidGVzdCJ9; HttpOnly; Path=/",
-        ]
-        self.assertEqual(extract_cookie_value(headers, "csrftoken"), "abc123")
-        self.assertEqual(
-            extract_cookie_value(headers, "LEETCODE_SESSION"),
-            "eyJzZXNzaW9uIjoidGVzdCJ9",
+class PublicCheckTests(unittest.TestCase):
+    DAY = "2026-10-10"
+    SLUG = "two-sum"
+
+    def _sub(self, slug=None, day="2026-10-10", status="Accepted"):
+        import calendar
+        from datetime import datetime, timezone
+
+        ts = str(
+            calendar.timegm(datetime(2026, 10, 10, tzinfo=timezone.utc).timetuple())
+            if day == "2026-10-10"
+            else calendar.timegm(
+                datetime(2026, 10, 9, tzinfo=timezone.utc).timetuple()
+            )
         )
-        self.assertIsNone(extract_cookie_value(headers, "missing"))
+        return {"titleSlug": slug or self.SLUG, "timestamp": ts, "statusDisplay": status}
 
-    def test_login_requires_credentials(self) -> None:
-        with self.assertRaises(LoginError):
-            login_with_password("", "")
-        with self.assertRaises(LoginError):
-            login_with_password("user", "")
+    def test_utc_day(self) -> None:
+        self.assertEqual(utc_day("1791086655"), "2026-10-04")
+        self.assertIsNone(utc_day("not-a-number"))
+        self.assertIsNone(utc_day(""))
 
-    def test_no_session_flags(self) -> None:
-        # No session is configured or cached: these options must not exist.
+    def test_accepted_today_is_done(self) -> None:
+        subs = [self._sub(status="Wrong Answer"), self._sub(status="Accepted")]
+        self.assertEqual(
+            summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
+            (True, False, True),
+        )
+
+    def test_attempted_today_without_accept(self) -> None:
+        subs = [self._sub(status="Wrong Answer")]
+        self.assertEqual(
+            summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
+            (False, True, False),
+        )
+
+    def test_old_accept_only_is_not_done(self) -> None:
+        subs = [self._sub(day="2026-10-09", status="Accepted")]
+        self.assertEqual(
+            summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
+            (False, False, True),
+        )
+
+    def test_other_problems_ignored(self) -> None:
+        subs = [self._sub(slug="three-sum", status="Accepted")]
+        self.assertEqual(
+            summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
+            (False, False, False),
+        )
+
+    def test_malformed_entries_ignored(self) -> None:
+        subs = ["junk", {"titleSlug": self.SLUG}, {"titleSlug": self.SLUG, "timestamp": "xx"}]
+        self.assertEqual(
+            summarize_daily_submissions(subs, slug=self.SLUG, day=self.DAY),
+            (False, False, False),
+        )
+
+    def test_username_flag(self) -> None:
+        self.assertEqual(parse_args(["--username", "bob"]).username, "bob")
         args = parse_args([])
-        self.assertFalse(hasattr(args, "session"))
-        self.assertFalse(hasattr(args, "csrf"))
-        self.assertFalse(hasattr(args, "auto_refresh"))
-        self.assertFalse(hasattr(args, "save_session"))
-        self.assertFalse(hasattr(args, "session_file"))
+        for gone in ("session", "csrf", "password", "session_file"):
+            self.assertFalse(hasattr(args, gone))
 
-    def test_run_without_credentials_returns_3(self) -> None:
+    def _run_with(self, challenge, env=None):
         import os
         from unittest import mock
 
         with tempfile.TemporaryDirectory() as tmp:
             env_file = str(Path(tmp) / ".env")
-            clean = {
-                k: v
-                for k, v in os.environ.items()
-                if k not in ("LEETCODE_USERNAME", "LEETCODE_PASSWORD")
-            }
-            with (
-                mock.patch.dict(os.environ, clean, clear=True),
-                mock.patch("check_daily.login_with_password") as login,
-            ):
-                code = run(["--env-file", env_file])
-            self.assertEqual(code, 3)
-            login.assert_not_called()
-
-    def test_run_logs_in_checks_out_and_logs_out(self) -> None:
-        import os
-        from unittest import mock
-
-        with tempfile.TemporaryDirectory() as tmp:
-            env_file = str(Path(tmp) / ".env")
-            with mock.patch.dict(
-                os.environ,
-                {"LEETCODE_USERNAME": "u", "LEETCODE_PASSWORD": "p"},
-                clear=True,
-            ):
-                with (
-                    mock.patch(
-                        "check_daily.login_with_password",
-                        return_value=("sess", "csrf"),
-                    ) as login,
-                    mock.patch(
-                        "check_daily.fetch_daily_challenge",
-                        return_value=_challenge(),
-                    ) as fetch,
-                    mock.patch("check_daily.logout_session") as logout,
-                ):
+            with mock.patch.dict(os.environ, env or {}, clear=True):
+                with mock.patch(
+                    "check_daily.fetch_daily_challenge", return_value=challenge
+                ) as fetch:
                     code = run(["--env-file", env_file])
-            self.assertEqual(code, 1)  # signed in, not done
-            login.assert_called_once_with("u", "p")
-            fetch.assert_called_once_with(session="sess", csrf="csrf")
-            logout.assert_called_once_with("sess", "csrf")
+            self.assertEqual(fetch.call_count, 1)
+            return code
 
-    def test_run_logs_out_even_when_check_fails(self) -> None:
+    def test_run_without_username_returns_3(self) -> None:
         import os
         from unittest import mock
 
-        from check_daily import LeetCodeError
-
         with tempfile.TemporaryDirectory() as tmp:
             env_file = str(Path(tmp) / ".env")
-            with mock.patch.dict(
-                os.environ,
-                {"LEETCODE_USERNAME": "u", "LEETCODE_PASSWORD": "p"},
-                clear=True,
-            ):
-                with (
-                    mock.patch(
-                        "check_daily.login_with_password",
-                        return_value=("sess", "csrf"),
-                    ),
-                    mock.patch(
-                        "check_daily.fetch_daily_challenge",
-                        side_effect=LeetCodeError("boom"),
-                    ),
-                    mock.patch("check_daily.logout_session") as logout,
-                ):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch(
+                    "check_daily.fetch_daily_challenge"
+                ) as fetch:
                     code = run(["--env-file", env_file])
-            self.assertEqual(code, 2)
-            logout.assert_called_once_with("sess", "csrf")
+        self.assertEqual(code, 3)
+        fetch.assert_not_called()
 
-    def test_logout_failure_never_fails_run(self) -> None:
-        from unittest import mock
-
-        with mock.patch(
-            "check_daily.logout_session", side_effect=LogoutError("nope")
-        ):
-            # Must not raise: logout is best-effort.
-            logout_quietly("sess", "csrf")
-        # Empty session is a no-op (also must not raise / call out).
-        with mock.patch("check_daily.logout_session") as logout:
-            logout_quietly(None, None)
-            logout.assert_not_called()
+    def test_run_exit_codes(self) -> None:
+        env = {"LEETCODE_USERNAME": "alice"}
+        done = _challenge(is_done=True, daily_user_status="Finish", question_status="ac")
+        self.assertEqual(self._run_with(done, env), 0)
+        self.assertEqual(self._run_with(_challenge(), env), 1)
+        unknown = _challenge(
+            is_done=False, user_found=False, username=None,
+            daily_user_status=None, question_status=None,
+        )
+        self.assertEqual(self._run_with(unknown, env), 3)
 
 
 if __name__ == "__main__":

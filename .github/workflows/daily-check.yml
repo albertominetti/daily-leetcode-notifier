@@ -1,19 +1,13 @@
 # Run the LeetCode daily check on a schedule and notify via Telegram.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
-#   LEETCODE_USERNAME
-#   LEETCODE_PASSWORD
+#   LEETCODE_USERNAME (your public LeetCode username)
 #   TELEGRAM_BOT_TOKEN
 #   TELEGRAM_CHAT_ID
 #
-# Auth is username/password only: every run does login → check → logout,
-# holding a session slot for seconds. Nothing is stored — not in secrets,
-# not in a cache file. Requires email/username + password login
-# (no SSO/2FA/captcha).
-#
-# LeetCode allows ~2 parallel sessions: the transient worker slot plus your
-# browser coexist fine. Stagger any second worker (e.g. server cron) by a
-# few minutes so the second-long windows never overlap.
+# Fully public check: no login, no password, no sessions. Done = an
+# Accepted submission on today's daily problem, dated today (UTC).
+# Any number of workers and devices coexist — nothing to stagger.
 #
 # Four runs only. Cron is UTC; times below match Europe/Zurich in winter (CET,
 # UTC+1). In summer (CEST, UTC+2) they fire one hour later local time.
@@ -126,10 +120,9 @@ jobs:
       - name: Run check_daily.py
         env:
           LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
-          LEETCODE_PASSWORD: ${{ secrets.LEETCODE_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        # Exit codes: 0 done, 1 not done, 2 error, 3 not signed in.
+        # Exit codes: 0 done, 1 not done, 2 error, 3 username missing.
         # Fail the job only on hard errors (2).
         run: |
           set +e

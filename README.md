@@ -8,19 +8,19 @@ Small Python script that:
 
 Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dependencies** — only the Python standard library (3.10+).
 
-> **Security:** Never commit `.env`. Treat `LEETCODE_PASSWORD` and `TELEGRAM_BOT_TOKEN` like passwords.
+> **Security:** Never commit `.env`. `LEETCODE_USERNAME` is public anyway; treat `TELEGRAM_BOT_TOKEN` like a password.
 
 ---
 
 ## Features
 
 - Daily problem info (title, difficulty, link, optional tags)
-- Completion check for the authenticated user
-- Telegram messages with HTML formatting (done / not done / session errors)
+- Public completion check (Accepted submission dated today; no login)
+- Telegram messages with HTML formatting (done / not done / lookup errors)
 - `--notify` sends Telegram when the daily is **incomplete** (errors always)
 - `--always` also notifies when the daily is already solved
 - `--silent` for quiet delivery (no sound); independent of completion
-- Auth and API failures **always alert** (never silent)
+- Lookup and API failures **always alert** (never silent)
 - Zero pip packages; works offline once `uv` has a Python interpreter
 - **GitHub Actions** schedule with secrets stored in the repository
 
@@ -29,7 +29,7 @@ Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dep
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) (or any Python 3.10+)
-- LeetCode account with username/email + password login (to check *your* progress; no SSO/2FA/captcha)
+- Your public LeetCode username (to check *your* progress — no login needed)
 - Telegram bot token + chat id (only if you use `--notify`)
 
 ---
@@ -51,13 +51,11 @@ cp .env.example .env
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `LEETCODE_USERNAME` | Yes | LeetCode username or email (fresh login every run) |
-| `LEETCODE_PASSWORD` | Yes | LeetCode password (never stored as a session; env-only) |
+| `LEETCODE_USERNAME` | Yes | Your public LeetCode username |
 | `TELEGRAM_BOT_TOKEN` | For `--notify` | Bot token from [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | For `--notify` | Your user or group chat id |
 
-**Local:** put them in `.env` (gitignored). Every run does login → check
-→ logout and stores nothing: the worker holds a session slot for seconds.
+**Local:** put them in `.env` (gitignored). No password, no session cookie — everything is queried from public endpoints, consuming zero session tokens.
 
 **Telegram:** create a bot with BotFather, send `/start` to the bot, then resolve your chat id (e.g. [@userinfobot](https://t.me/userinfobot) or `getUpdates`).
 
@@ -69,10 +67,7 @@ Workflow file: [`.github/workflows/daily-check.yml`](.github/workflows/daily-che
 
 Runs the same check on GitHub-hosted runners and sends Telegram messages using **repository secrets** (never commit tokens to the repo).
 
-> **Two workers welcome.** LeetCode allows ~2 parallel sessions, and each
-> run holds a slot for seconds only (login → check → logout), so this
-> workflow, a server cron, and your browser coexist fine. Just stagger the
-> workers by a few minutes so their second-long windows never overlap.
+> **Zero session limit impact:** queries use public LeetCode GraphQL endpoints, so GitHub Actions, server cron, and all your devices coexist with zero risk of logging each other out.
 
 ### 1. Add repository secrets
 
@@ -82,15 +77,9 @@ In your GitHub repo:
 
 | Secret name | Value |
 |-------------|--------|
-| `LEETCODE_USERNAME` | Your LeetCode username or email |
-| `LEETCODE_PASSWORD` | Your LeetCode password |
+| `LEETCODE_USERNAME` | Your public LeetCode username |
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
 | `TELEGRAM_CHAT_ID` | Your Telegram chat id |
-
-> **Nothing stored:** on a Linux server, credentials live in `.env`; on
-> GitHub runners, everything comes from repository secrets (there is no
-> `.env` there). No session is kept anywhere — each run logs in, checks,
-> and logs out again.
 
 ### 2. Enable Actions
 
@@ -122,7 +111,7 @@ Inputs:
 ### 5. Job success vs “not done”
 
 The workflow **fails only on hard errors** (exit code `2`: network / GraphQL / Telegram).  
-Exit codes `0` (done), `1` (not done), and `3` (not signed in) still finish the job green so Actions noise stays low; Telegram still carries the real status.
+Exit codes `0` (done), `1` (not done), and `3` (username not set) still finish the job green so Actions noise stays low; Telegram still carries the real status.
 
 ### Example: wire secrets in the workflow
 
@@ -131,7 +120,6 @@ Secrets are injected as environment variables (already done in the workflow):
 ```yaml
 env:
   LEETCODE_USERNAME: ${{ secrets.LEETCODE_USERNAME }}
-  LEETCODE_PASSWORD: ${{ secrets.LEETCODE_PASSWORD }}
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 ```
@@ -171,11 +159,11 @@ python3 check_daily.py --env-file .env
 
 | Flag | Meaning |
 |------|---------|
-| `--username VALUE` | Override `LEETCODE_USERNAME` (password stays env-only) |
+| `--username VALUE` | Override `LEETCODE_USERNAME` |
 | `--json` | Machine-readable JSON |
 | `--tags` | Include topic tags (hidden by default) |
-| `--notify` | Send Telegram when incomplete (login/API errors always) |
-| `--silent` | With `--notify`: quiet delivery (`disable_notification`). Auth/API errors always alert |
+| `--notify` | Send Telegram when incomplete (user/API errors always) |
+| `--silent` | With `--notify`: quiet delivery (`disable_notification`). Errors always alert |
 | `--always` | With `--notify`: also send when the daily is already solved |
 | `--env-file PATH` | Env file to load (default: `.env`) |
 | `--quiet-ok` | Suppress stdout when the daily is already done |
@@ -186,17 +174,17 @@ python3 check_daily.py --env-file .env
 |-----------|------------|---------------------|---------------------|
 | Daily **done** | *No message* | *No message* | Message (+ sound unless `--silent`) |
 | Daily **not done** | Message + sound | Message, quiet | Same |
-| Login failed | **Alert** | **Alert** | **Alert** |
+| User lookup error | **Alert** | **Alert** | **Alert** |
 | API / network error | **Alert** | **Alert** | **Alert** |
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Signed in and daily is **done** |
-| `1` | Signed in and daily is **not done** |
+| `0` | Daily is **done** |
+| `1` | Daily is **not done** |
 | `2` | LeetCode / Telegram / network error |
-| `3` | Not signed in (cannot evaluate completion) |
+| `3` | Username missing (cannot evaluate completion) |
 
 ---
 
@@ -204,31 +192,27 @@ python3 check_daily.py --env-file .env
 
 The script does **not** hardcode times. You choose when it runs via **cron**, **GitHub Actions** (see above), or systemd timers. Below is one sensible daily pattern for a machine crontab (local timezone).
 
-> **Stagger the workers:** the GitHub workflow fires on the hour, so run
-> cron at `:07` — the two workers then never hold session slots at the same
-> moment (each run takes seconds), and your browser is never evicted.
-
 ### Suggested logic
 
 | Local time | Flags | Intent |
 |------------|-------|--------|
-| **10:07** | `--notify --silent` | Quiet if still open |
-| **14:07** | `--notify --silent` | Quiet if still open |
-| **18:07** | `--notify --silent` | Quiet if still open |
-| **23:07** | `--notify` | Sound if still open |
+| **10:00** | `--notify --silent` | Quiet if still open |
+| **14:00** | `--notify --silent` | Quiet if still open |
+| **18:00** | `--notify --silent` | Quiet if still open |
+| **23:00** | `--notify` | Sound if still open |
 
 **Why this combo for cron?**
 
 - `--notify` already skips when done; no extra flag needed on schedules.
 - Daytime uses `--silent`; night does not (sound if still open).
 - Use `--always` only when you want a “DONE” confirmation.
-- Login problems always alert with sound.
+- API / lookup errors always alert with sound.
 
 ```text
-        10:07          14:07          18:07          23:07
-           |              |              |              |
-           v              v              v              v
-      quiet if open  quiet if open  quiet if open  alert if open
+        10:00          14:00          18:00          23:00
+          |              |              |              |
+          v              v              v              v
+     quiet if open  quiet if open  quiet if open  alert if open
 ```
 
 ### Example crontab
@@ -237,23 +221,22 @@ Replace `PROJECT` with your clone path and `UV` with `which uv` (or use a full p
 
 ```cron
 # Daily LeetCode notifier (machine local timezone)
-# :07 offset keeps clear of the GitHub workflow's on-the-hour runs
 # Quiet status through the day
-7 10 * * * cd PROJECT && UV run check_daily.py --notify --silent
-7 14 * * * cd PROJECT && UV run check_daily.py --notify --silent
-7 18 * * * cd PROJECT && UV run check_daily.py --notify --silent
+0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent
+0 14 * * * cd PROJECT && UV run check_daily.py --notify --silent
+0 18 * * * cd PROJECT && UV run check_daily.py --notify --silent
 
 # Night: sound only if the daily is still incomplete
-7 23 * * * cd PROJECT && UV run check_daily.py --notify
+0 23 * * * cd PROJECT && UV run check_daily.py --notify
 ```
 
 Concrete example:
 
 ```cron
-7 10 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-7 14 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-7 18 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
-7 23 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify
+0 10 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
+0 14 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
+0 18 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify --silent
+0 23 * * * cd /home/you/daily-leetcode-notifier && /home/you/.local/bin/uv run check_daily.py --notify
 ```
 
 Install:
@@ -271,7 +254,7 @@ crontab -l   # verify
 **Optional logging** (not required):
 
 ```cron
-7 10 * * * cd PROJECT && UV run check_daily.py --notify --silent >>/tmp/leetcode-daily.log 2>&1
+0 10 * * * cd PROJECT && UV run check_daily.py --notify --silent >>/tmp/leetcode-daily.log 2>&1
 ```
 
 ### Other schedules (examples)
@@ -313,17 +296,15 @@ daily-leetcode-notifier/
 
 ## How completion is detected
 
-Against LeetCode’s GraphQL API (`https://leetcode.com/graphql`):
+Against LeetCode’s public GraphQL API (`https://leetcode.com/graphql`):
 
-- Daily is **done** only when the daily node `userStatus == Finish`
-- Lifetime problem `status == ac` is **not** enough: an old accepted submission does not credit today’s daily challenge
-- When the problem was solved before but today’s daily is still open, status is **NOT DONE** with a “done in the past” hint (submit again for today’s credit)
+1. Fetches today's challenge from `activeDailyCodingChallengeQuestion`
+2. Fetches the user's recent submissions from `recentSubmissionList(username: ...)`
+3. Daily is **done** only when an **Accepted** submission on today's problem exists with a timestamp on **today's UTC date**
+4. Lifetime problem acceptance is **not** enough: an old accepted submission does not credit today's daily challenge
+5. When the problem was solved in the past but not yet today, status is **NOT DONE** with a “done in the past” hint (submit again for today’s credit)
 
-This tool **only reads** status. It does not submit solutions.
-
-Login happens fresh on every run; when Telegram reports a login failure,
-check `LEETCODE_USERNAME` / `LEETCODE_PASSWORD` (`.env` locally, repository
-secrets in CI).
+This tool **only reads** public status. It does not submit solutions and requires no login or session cookies.
 
 ---
 
