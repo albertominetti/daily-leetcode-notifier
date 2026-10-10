@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """
-Check LeetCode's daily coding challenge and whether the authenticated user
-has completed today's daily (a lifetime AC on the same problem does not count).
+Check LeetCode's daily coding challenge and whether a user has completed
+today's daily (a lifetime AC on the same problem does not count).
+
+Fully public, zero auth: the daily problem and the user's recent
+submissions are both readable without logging in, so a run consumes none
+of LeetCode's ~2 parallel sessions. Any number of workers (server cron,
+GitHub Actions, ...) and devices coexist. Only LEETCODE_USERNAME (the
+public LeetCode username) is configured — no password, no session,
+nothing stored.
+
+Done = an Accepted submission on today's daily problem, dated today (UTC).
+If 20+ accepted submissions occurred today and the daily wasn't among them,
+status is CAN'T VERIFY (the public history buffer overflowed).
 
 Optional Telegram alerts via --notify (incomplete by default; use --always
 to also report when done; --silent for quiet deliveries).
-Authentication errors always notify and are never silent.
+Lookup/API errors always notify and are never silent.
 """
 
 from __future__ import annotations
@@ -17,6 +28,7 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +43,9 @@ STATUS_FINISH = "Finish"
 # question.status for the logged-in user
 QSTATUS_AC = "ac"
 QSTATUS_NOTAC = "notac"
+
+# How many recent submissions to request from LeetCode (capped at 20 upstream).
+RECENT_LIMIT = 20
 
 
 DAILY_QUERY = """
@@ -54,13 +69,19 @@ query questionOfToday {
 }
 """
 
-USER_STATUS_QUERY = """
-query {
-  userStatus {
-    isSignedIn
+RECENT_SUBMISSIONS_QUERY = """
+query recentSubmissions($username: String!, $limit: Int!) {
+  matchedUser(username: $username) {
     username
-    realName
-    userSlug
+  }
+  recentSubmissionList(username: $username, limit: $limit) {
+    titleSlug
+    timestamp
+    statusDisplay
+  }
+  recentAcSubmissionList(username: $username, limit: $limit) {
+    titleSlug
+    timestamp
   }
 }
 """
@@ -76,13 +97,13 @@ class DailyChallenge:
     link: str
     ac_rate: float | None
     topic_tags: list[str]
-    # Authenticated fields
+    # Synthesized from public submissions (no auth)
     daily_user_status: str | None  # NotStart | Finish | ...
     question_status: str | None  # ac | notac | None
     is_done: bool
-    previously_solved: bool  # lifetime AC, but today's daily is not Finish
     username: str | None
-    is_signed_in: bool
+    user_found: bool
+    cant_verify: bool = False  # 20+ ACs today rolled off the public window
 
 
 class LeetCodeError(RuntimeError):
@@ -111,11 +132,10 @@ def load_dotenv(path: Path) -> None:
 def graphql(
     query: str,
     *,
-    session: str | None = None,
-    csrf: str | None = None,
     variables: dict[str, Any] | None = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
+    """POST a GraphQL query. No auth — all data used here is public."""
     payload = {"query": query}
     if variables is not None:
         payload["variables"] = variables
@@ -130,15 +150,6 @@ def graphql(
         "Origin": LEETCODE_ORIGIN,
         "Referer": f"{LEETCODE_ORIGIN}/problemset/",
     }
-
-    cookies: list[str] = []
-    if session:
-        cookies.append(f"LEETCODE_SESSION={session}")
-    if csrf:
-        cookies.append(f"csrftoken={csrf}")
-        headers["x-csrftoken"] = csrf
-    if cookies:
-        headers["Cookie"] = "; ".join(cookies)
 
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -176,48 +187,58 @@ def graphql(
     return data["data"]
 
 
-def fetch_user_status(
-    session: str | None, csrf: str | None
-) -> tuple[bool, str | None]:
-    if not session:
-        return False, None
-    data = graphql(USER_STATUS_QUERY, session=session, csrf=csrf)
-    status = data.get("userStatus") or {}
-    is_signed_in = bool(status.get("isSignedIn"))
-    username = status.get("username") or status.get("userSlug") or None
-    if username == "":
-        username = None
-    return is_signed_in, username
+def utc_day(timestamp: str | int) -> str | None:
+    """UTC calendar day (YYYY-MM-DD) of a LeetCode epoch timestamp."""
+    try:
+        moment = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return moment.strftime("%Y-%m-%d")
+
+
+def summarize_daily_submissions(
+    submissions: list[dict[str, Any]],
+    *,
+    slug: str,
+    day: str,
+) -> tuple[bool, bool]:
+    """
+    Verdict from public recent submissions: (done, attempted_today).
+
+    done = Accepted submission on this problem dated today (UTC).
+    """
+    done = False
+    attempted_today = False
+    for sub in submissions:
+        if not isinstance(sub, dict) or sub.get("titleSlug") != slug:
+            continue
+        accepted = str(sub.get("statusDisplay") or "").lower() == "accepted"
+        if utc_day(sub.get("timestamp") or "") == day:
+            if accepted:
+                done = True
+            else:
+                attempted_today = True
+    if done:
+        attempted_today = False
+    return done, attempted_today
 
 
 def is_challenge_done(daily_user_status: str | None) -> bool:
     """
-    Daily challenge is done only when LeetCode marks the daily node Finish.
-
-    Lifetime problem AC (question.status == ac) does not count: an old
-    submission does not credit today's daily challenge.
+    Done only when the synthesized daily status is Finish, i.e. an Accepted
+    submission on today's problem dated today.
     """
     return bool(
         daily_user_status and daily_user_status.lower() == STATUS_FINISH.lower()
     )
 
 
-def is_solved_in_the_past(
-    daily_user_status: str | None, question_status: str | None
-) -> bool:
-    """True when the problem was accepted before, but today's daily is not Finish."""
-    if is_challenge_done(daily_user_status):
-        return False
-    return bool(question_status and question_status.lower() == QSTATUS_AC)
-
-
-def fetch_daily_challenge(
-    session: str | None = None,
-    csrf: str | None = None,
-) -> DailyChallenge:
-    is_signed_in, username = fetch_user_status(session, csrf)
-
-    data = graphql(DAILY_QUERY, session=session, csrf=csrf)
+def fetch_daily_challenge(username: str) -> DailyChallenge:
+    """
+    Fetch today's daily plus the user's public recent submissions, and
+    synthesize the completion verdict. No auth, no session.
+    """
+    data = graphql(DAILY_QUERY)
     node = data.get("activeDailyCodingChallengeQuestion")
     if not node:
         raise LeetCodeError("No active daily coding challenge returned.")
@@ -225,28 +246,81 @@ def fetch_daily_challenge(
     question = node.get("question") or {}
     tags = [t.get("name") for t in (question.get("topicTags") or []) if t.get("name")]
 
-    daily_user_status = node.get("userStatus")
-    question_status = question.get("status")
-    link_path = node.get("link") or f"/problems/{question.get('titleSlug', '')}/"
+    title_slug = question.get("titleSlug") or ""
+    link_path = node.get("link") or f"/problems/{title_slug}/"
     if not link_path.startswith("http"):
         link = f"{LEETCODE_ORIGIN}{link_path}"
     else:
         link = link_path
+    day = node.get("date") or ""
 
-    done = False
-    previously_solved = False
-    if is_signed_in:
-        done = is_challenge_done(daily_user_status)
-        previously_solved = is_solved_in_the_past(daily_user_status, question_status)
-    else:
-        # Without auth, userStatus is always NotStart and is not meaningful.
+    recent = graphql(
+        RECENT_SUBMISSIONS_QUERY,
+        variables={"username": username, "limit": RECENT_LIMIT},
+    )
+    matched = recent.get("matchedUser") or {}
+    resolved = matched.get("username") or None
+    if not resolved:
+        # Unknown user: cannot evaluate completion.
+        return DailyChallenge(
+            date=day,
+            title=question.get("title") or "",
+            title_slug=title_slug,
+            difficulty=question.get("difficulty") or "Unknown",
+            frontend_id=str(question.get("questionFrontendId") or ""),
+            link=link,
+            ac_rate=question.get("acRate"),
+            topic_tags=tags,
+            daily_user_status=None,
+            question_status=None,
+            is_done=False,
+            username=None,
+            user_found=False,
+            cant_verify=False,
+        )
+
+    recent_ac_list = [
+        s for s in (recent.get("recentAcSubmissionList") or []) if isinstance(s, dict)
+    ]
+    today_ac_count = sum(
+        1 for s in recent_ac_list if utc_day(s.get("timestamp") or "") == day
+    )
+
+    subs: list[dict[str, Any]] = [
+        s for s in (recent.get("recentSubmissionList") or []) if isinstance(s, dict)
+    ]
+    # Also merge recentAcSubmissionList: ensures a flurry of non-accepted
+    # attempts on other problems does not push today's accepted daily out of
+    # the 20-item window.
+    for ac in recent_ac_list:
+        subs.append({**ac, "statusDisplay": "Accepted"})
+
+    done, attempted_today = summarize_daily_submissions(
+        subs, slug=title_slug, day=day
+    )
+
+    cant_verify = False
+    if done:
+        daily_user_status: str | None = STATUS_FINISH
+        question_status: str | None = QSTATUS_AC
+    elif len(recent_ac_list) >= 20 and today_ac_count >= 20:
+        # If the user has 20 or more Accepted submissions today and the daily
+        # wasn't among them, older submissions from earlier today have rolled
+        # off the 20-item public window: we cannot verify whether it was done.
+        cant_verify = True
         daily_user_status = None
+        question_status = None
+    elif attempted_today:
+        daily_user_status = STATUS_NOT_START
+        question_status = QSTATUS_NOTAC
+    else:
+        daily_user_status = STATUS_NOT_START
         question_status = None
 
     return DailyChallenge(
-        date=node.get("date") or "",
+        date=day,
         title=question.get("title") or "",
-        title_slug=question.get("titleSlug") or "",
+        title_slug=title_slug,
         difficulty=question.get("difficulty") or "Unknown",
         frontend_id=str(question.get("questionFrontendId") or ""),
         link=link,
@@ -254,10 +328,10 @@ def fetch_daily_challenge(
         topic_tags=tags,
         daily_user_status=daily_user_status,
         question_status=question_status,
-        is_done=done,
-        previously_solved=previously_solved,
-        username=username,
-        is_signed_in=is_signed_in,
+        is_done=is_challenge_done(daily_user_status),
+        username=resolved,
+        user_found=True,
+        cant_verify=cant_verify,
     )
 
 
@@ -277,32 +351,30 @@ def format_human(challenge: DailyChallenge, *, show_tags: bool = False) -> str:
         lines.append(f"Tags:       {', '.join(challenge.topic_tags)}")
     lines.append("-" * 40)
 
-    if not challenge.is_signed_in:
-        lines.append("User:       (not signed in)")
-        lines.append("Status:     UNKNOWN — set LEETCODE_SESSION to check completion")
+    if not challenge.user_found:
+        lines.append("User:       (unknown user)")
+        lines.append("Status:     UNKNOWN — user not found")
         lines.append("")
         lines.append(
-            "Tip: copy the LEETCODE_SESSION cookie from your browser while "
-            "logged into leetcode.com and export it, or put it in a .env file."
+            "Tip: LEETCODE_USERNAME must be your public LeetCode username."
         )
     else:
-        who = challenge.username or "(signed in)"
+        who = challenge.username or "(user)"
         lines.append(f"User:       {who}")
         if challenge.is_done:
             lines.append("Status:     DONE ✓  — daily challenge already solved")
-        elif challenge.previously_solved:
+        elif challenge.cant_verify:
             lines.append(
-                "Status:     NOT DONE  — done in the past; "
-                "submit again for today's daily"
+                "Status:     CAN'T VERIFY ⚠️  — 20+ accepted submissions today; "
+                "older submissions rolled off public history"
             )
         else:
-            detail = challenge.daily_user_status or challenge.question_status or "NotStart"
             if challenge.question_status == QSTATUS_NOTAC:
                 lines.append(
-                    f"Status:     NOT DONE  — attempted but not accepted ({detail})"
+                    "Status:     NOT DONE  — attempted today but not accepted"
                 )
             else:
-                lines.append(f"Status:     NOT DONE  — not solved yet ({detail})")
+                lines.append("Status:     NOT DONE  — not solved today")
 
     return "\n".join(lines)
 
@@ -341,16 +413,15 @@ def format_telegram_status(challenge: DailyChallenge) -> str:
         f'🔗 <a href="{link}">Open problem</a>'
     )
 
-    if not challenge.is_signed_in:
+    if not challenge.user_found:
         return (
-            "⚠️ <b>LeetCode · Session invalid</b>\n"
+            "⚠️ <b>LeetCode · User not found</b>\n"
             "\n"
-            "Your <code>LEETCODE_SESSION</code> cookie is missing, expired, "
-            "or not accepted.\n"
+            "No public LeetCode user matches the configured username.\n"
             "\n"
             f"{problem_block}\n"
             "\n"
-            "👉 Refresh the cookie in <code>.env</code> and re-run."
+            "👉 Set <code>LEETCODE_USERNAME</code> to your public username."
         )
 
     if challenge.is_done:
@@ -362,14 +433,23 @@ def format_telegram_status(challenge: DailyChallenge) -> str:
             f"Status: <b>DONE</b> · {who}"
         )
 
-    if challenge.previously_solved:
+    if challenge.cant_verify:
+        return (
+            "⚠️ <b>LeetCode · Can't verify</b>\n"
+            "\n"
+            f"{problem_block}\n"
+            "\n"
+            f"Status: <b>CAN'T VERIFY</b> · 20+ ACs today · {who}\n"
+            "Older submissions rolled off public history; verify manually on leetcode.com."
+        )
+
+    if challenge.question_status == QSTATUS_NOTAC:
         return (
             "❌ <b>LeetCode · Daily not done</b>\n"
             "\n"
             f"{problem_block}\n"
             "\n"
-            f"Status: <b>NOT DONE</b> · done in the past · {who}\n"
-            "Submit again to get today's credit."
+            f"Status: <b>NOT DONE</b> · attempted today · {who}"
         )
 
     return (
@@ -458,19 +538,19 @@ def notify_challenge(
     Send a Telegram message for a successful status fetch.
 
     Rules:
-    - Auth invalid: always send, never silent.
+    - Unknown user: always send, never silent.
     - --notify (default): send only when the daily is still incomplete.
     - --always: also send when the daily is already solved.
-    - --silent: quiet delivery (disable_notification); never for auth errors.
+    - --silent: quiet delivery (disable_notification); never for user/API errors.
     """
     bot_token, chat_id = resolve_telegram_target()
 
-    if not challenge.is_signed_in:
+    if not challenge.user_found:
         send_telegram(
             format_telegram_status(challenge),
             bot_token=bot_token,
             chat_id=chat_id,
-            silent=False,  # auth errors are never silent
+            silent=False,  # user/API errors are never silent
         )
         return
 
@@ -486,7 +566,7 @@ def notify_challenge(
 
 
 def notify_error(message: str) -> None:
-    """Errors (API/auth plumbing) always alert with sound."""
+    """Errors (API/user lookup) always alert with sound."""
     bot_token, chat_id = resolve_telegram_target()
     send_telegram(
         format_telegram_error(message),
@@ -504,14 +584,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--session",
-        default=os.environ.get("LEETCODE_SESSION"),
-        help="LEETCODE_SESSION cookie value (default: $LEETCODE_SESSION)",
-    )
-    parser.add_argument(
-        "--csrf",
-        default=os.environ.get("LEETCODE_CSRFTOKEN") or os.environ.get("CSRFTOKEN"),
-        help="Optional csrftoken cookie (default: $LEETCODE_CSRFTOKEN)",
+        "--username",
+        default=os.environ.get("LEETCODE_USERNAME"),
+        help="Public LeetCode username (default: $LEETCODE_USERNAME)",
     )
     parser.add_argument(
         "--json",
@@ -528,7 +603,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Send a Telegram message when the daily is still incomplete "
-            "(and always on session/API errors). Use --always to also report "
+            "(and always on user/API errors). Use --always to also report "
             "when already solved."
         ),
     )
@@ -537,7 +612,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "With --notify: deliver quietly (disable_notification). "
-            "Auth/API errors are never silent. Without --notify this flag is ignored."
+            "User/API errors are never silent. Without --notify this flag is ignored."
         ),
     )
     parser.add_argument(
@@ -563,21 +638,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(argv: list[str] | None = None) -> int:
     """Run the CLI and return a process exit code."""
-    # Load .env before argparse defaults re-read env in parse_args path:
-    # we load first, then parse so --session still wins over env.
+    # Load .env before argparse defaults read env, so --username still wins.
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--env-file", default=".env")
     pre_args, _remaining = pre.parse_known_args(argv)
     load_dotenv(Path(pre_args.env_file))
 
     args = parse_args(argv)
-    # Re-bind session/csrf after dotenv load if CLI did not override
-    session = args.session or os.environ.get("LEETCODE_SESSION")
-    csrf = (
-        args.csrf
-        or os.environ.get("LEETCODE_CSRFTOKEN")
-        or os.environ.get("CSRFTOKEN")
-    )
+    username = args.username or os.environ.get("LEETCODE_USERNAME")
 
     if args.silent and not args.notify:
         print(
@@ -590,8 +658,19 @@ def run(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if not username:
+        message = "LEETCODE_USERNAME must be set (env or .env)."
+        print(f"Error: {message}", file=sys.stderr)
+        if args.notify:
+            try:
+                notify_error(message)
+            except TelegramError as tg_exc:
+                print(f"Telegram error: {tg_exc}", file=sys.stderr)
+                return 2
+        return 3
+
     try:
-        challenge = fetch_daily_challenge(session=session, csrf=csrf)
+        challenge = fetch_daily_challenge(username)
     except LeetCodeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         if args.notify:
@@ -603,7 +682,7 @@ def run(argv: list[str] | None = None) -> int:
         return 2
 
     suppress_stdout = (
-        args.quiet_ok and challenge.is_signed_in and challenge.is_done
+        args.quiet_ok and challenge.user_found and challenge.is_done
     )
     if not suppress_stdout:
         if args.json:
@@ -625,7 +704,7 @@ def run(argv: list[str] | None = None) -> int:
             print(f"Telegram error: {tg_exc}", file=sys.stderr)
             return 2
 
-    if not challenge.is_signed_in:
+    if not challenge.user_found:
         return 3  # cannot determine completion
     if challenge.is_done:
         return 0
