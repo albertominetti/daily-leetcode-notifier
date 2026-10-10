@@ -11,7 +11,8 @@ public LeetCode username) is configured — no password, no session,
 nothing stored.
 
 Done = an Accepted submission on today's daily problem, dated today (UTC).
-An old AC without one today does not count.
+If 20+ accepted submissions occurred today and the daily wasn't among them,
+status is CAN'T VERIFY (the public history buffer overflowed).
 
 Optional Telegram alerts via --notify (incomplete by default; use --always
 to also report when done; --silent for quiet deliveries).

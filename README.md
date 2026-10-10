@@ -16,7 +16,7 @@ Built with [`uv`](https://github.com/astral-sh/uv). **No third-party runtime dep
 
 - Daily problem info (title, difficulty, link, optional tags)
 - Public completion check (Accepted submission dated today; no login)
-- Telegram messages with HTML formatting (done / not done / lookup errors)
+- Telegram messages with HTML formatting (done ✅ / not done ❌ / can't verify ⚠️ / lookup error ⚠️)
 - `--notify` sends Telegram when the daily is **incomplete** (errors always)
 - `--always` also notifies when the daily is already solved
 - `--silent` for quiet delivery (no sound); independent of completion
@@ -170,13 +170,13 @@ python3 check_daily.py --env-file .env
 
 ### Notification rules
 
-| Situation | `--notify` | `--notify --silent` | `--notify --always` |
-|-----------|------------|---------------------|---------------------|
-| Daily **done** | *No message* | *No message* | Message (+ sound unless `--silent`) |
-| Daily **not done** | Message + sound | Message, quiet | Same |
-| **Can't verify** (20+ ACs today) | Message + sound | Message, quiet | Same |
-| User lookup error | **Alert** | **Alert** | **Alert** |
-| API / network error | **Alert** | **Alert** | **Alert** |
+| Situation | Header Icon | `--notify` | `--notify --silent` | `--notify --always` |
+|-----------|:-----------:|------------|---------------------|---------------------|
+| Daily **done** | ✅ | *No message* | *No message* | Message (+ sound unless `--silent`) |
+| Daily **not done** | ❌ | Message + sound | Message, quiet | Same |
+| **Can't verify** (20+ ACs today) | ⚠️ | Message + sound | Message, quiet | Same |
+| User lookup error | ⚠️ | **Alert** | **Alert** | **Alert** |
+| API / network error | ⚠️ | **Alert** | **Alert** | **Alert** |
 
 ### Exit codes
 
