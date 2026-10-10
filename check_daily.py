@@ -43,8 +43,8 @@ STATUS_FINISH = "Finish"
 QSTATUS_AC = "ac"
 QSTATUS_NOTAC = "notac"
 
-# How many recent submissions to scan for today's verdict.
-RECENT_LIMIT = 50
+# How many recent submissions to request from LeetCode (capped at 20 upstream).
+RECENT_LIMIT = 20
 
 
 DAILY_QUERY = """
@@ -77,6 +77,10 @@ query recentSubmissions($username: String!, $limit: Int!) {
     titleSlug
     timestamp
     statusDisplay
+  }
+  recentAcSubmissionList(username: $username, limit: $limit) {
+    titleSlug
+    timestamp
   }
 }
 """
@@ -287,8 +291,15 @@ def fetch_daily_challenge(username: str) -> DailyChallenge:
             user_found=False,
         )
 
-    subs = recent.get("recentSubmissionList") or []
-    subs = [s for s in subs if isinstance(s, dict)]
+    subs: list[dict[str, Any]] = [
+        s for s in (recent.get("recentSubmissionList") or []) if isinstance(s, dict)
+    ]
+    # Also merge recentAcSubmissionList: ensures a flurry of non-accepted
+    # attempts on other problems does not push today's accepted daily out of
+    # the 20-item window.
+    for ac in recent.get("recentAcSubmissionList") or []:
+        if isinstance(ac, dict):
+            subs.append({**ac, "statusDisplay": "Accepted"})
     done, attempted_today, ever_ac = summarize_daily_submissions(
         subs, slug=title_slug, day=day
     )

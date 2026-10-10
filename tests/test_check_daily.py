@@ -216,6 +216,41 @@ class PublicCheckTests(unittest.TestCase):
         )
         self.assertEqual(self._run_with(unknown, env), 3)
 
+    def test_fetch_daily_challenge_merges_ac_list(self) -> None:
+        from unittest import mock
+
+        import check_daily
+
+        fake_daily = {
+            "activeDailyCodingChallengeQuestion": {
+                "date": "2026-10-10",
+                "question": {
+                    "questionFrontendId": "1",
+                    "title": "Two Sum",
+                    "titleSlug": "two-sum",
+                    "difficulty": "Easy",
+                    "acRate": 50.0,
+                    "topicTags": [],
+                },
+            }
+        }
+        fake_user = {
+            "matchedUser": {"username": "bob"},
+            # recentSubmissionList only has a non-AC attempt
+            "recentSubmissionList": [
+                {"titleSlug": "two-sum", "timestamp": "1791633600", "statusDisplay": "Wrong Answer"}
+            ],
+            # but recentAcSubmissionList has the Accepted solution
+            "recentAcSubmissionList": [
+                {"titleSlug": "two-sum", "timestamp": "1791633600"}
+            ],
+        }
+
+        with mock.patch("check_daily.graphql", side_effect=[fake_daily, fake_user]):
+            c = check_daily.fetch_daily_challenge("bob")
+        self.assertTrue(c.is_done)
+        self.assertEqual(c.daily_user_status, "Finish")
+
 
 if __name__ == "__main__":
     unittest.main()
