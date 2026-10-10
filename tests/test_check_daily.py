@@ -13,10 +13,15 @@ if str(_ROOT) not in sys.path:
 
 from check_daily import (
     DailyChallenge,
+    LoginError,
+    extract_cookie_value,
     format_human,
     format_telegram_status,
     is_challenge_done,
     is_solved_in_the_past,
+    login_with_password,
+    parse_args,
+    update_dotenv_value,
 )
 
 
@@ -107,6 +112,44 @@ class StatusCopyTests(unittest.TestCase):
         )
         self.assertNotIn("done in the past", format_human(challenge))
         self.assertNotIn("done in the past", format_telegram_status(challenge))
+
+
+class AutoRefreshTests(unittest.TestCase):
+    def test_extract_cookie_value(self) -> None:
+        headers = [
+            "csrftoken=abc123; expires=Sun, 11-Oct-2026 12:00:00 GMT; Path=/",
+            "LEETCODE_SESSION=eyJzZXNzaW9uIjoidGVzdCJ9; HttpOnly; Path=/",
+        ]
+        self.assertEqual(extract_cookie_value(headers, "csrftoken"), "abc123")
+        self.assertEqual(
+            extract_cookie_value(headers, "LEETCODE_SESSION"),
+            "eyJzZXNzaW9uIjoidGVzdCJ9",
+        )
+        self.assertIsNone(extract_cookie_value(headers, "missing"))
+
+    def test_login_requires_credentials(self) -> None:
+        with self.assertRaises(LoginError):
+            login_with_password("", "")
+        with self.assertRaises(LoginError):
+            login_with_password("user", "")
+
+    def test_parse_auto_refresh_flags(self) -> None:
+        args = parse_args(["--auto-refresh", "--save-session"])
+        self.assertTrue(args.auto_refresh)
+        self.assertTrue(args.save_session)
+
+    def test_update_dotenv_upserts(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / ".env"
+            p.write_text("LEETCODE_SESSION=old\nOTHER=1\n", encoding="utf-8")
+            update_dotenv_value(p, "LEETCODE_SESSION", "new")
+            update_dotenv_value(p, "LEETCODE_CSRFTOKEN", "csrf1")
+            text = p.read_text(encoding="utf-8")
+            self.assertIn("LEETCODE_SESSION=new", text)
+            self.assertIn("LEETCODE_CSRFTOKEN=csrf1", text)
+            self.assertIn("OTHER=1", text)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,11 @@ has completed today's daily (a lifetime AC on the same problem does not count).
 Optional Telegram alerts via --notify (incomplete by default; use --always
 to also report when done; --silent for quiet deliveries).
 Authentication errors always notify and are never silent.
+
+Optional password auto-refresh via --auto-refresh (LEETCODE_USERNAME /
+LEETCODE_PASSWORD): when the session is invalid, log in once via
+https://leetcode.com/accounts/login/ to obtain a fresh LEETCODE_SESSION.
+Fails loudly on captcha/Cloudflare — then refresh the cookie manually.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -22,7 +28,13 @@ from typing import Any
 
 LEETCODE_GRAPHQL = "https://leetcode.com/graphql"
 LEETCODE_ORIGIN = "https://leetcode.com"
+LEETCODE_LOGIN_URL = "https://leetcode.com/accounts/login/"
 TELEGRAM_API = "https://api.telegram.org"
+
+BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
 
 # userStatus on the daily challenge node
 STATUS_NOT_START = "NotStart"
@@ -87,6 +99,10 @@ class DailyChallenge:
 
 class LeetCodeError(RuntimeError):
     """Raised when LeetCode GraphQL requests fail or return unexpected data."""
+
+
+class LoginError(RuntimeError):
+    """Raised when password auto-login fails (bad creds, captcha, Cloudflare)."""
 
 
 class TelegramError(RuntimeError):
@@ -188,6 +204,176 @@ def fetch_user_status(
     if username == "":
         username = None
     return is_signed_in, username
+
+
+def extract_cookie_value(set_cookie_headers: list[str], name: str) -> str | None:
+    """Extract a cookie value from raw Set-Cookie header strings."""
+    for header in set_cookie_headers:
+        for part in header.split(";"):
+            part = part.strip()
+            if part.startswith(name + "="):
+                value = part[len(name) + 1 :]
+                if value and value != '""':
+                    return value.strip('"')
+    return None
+
+
+def _collect_set_cookies(response: Any) -> list[str]:
+    """Collect Set-Cookie headers from a urllib response (redirect or not)."""
+    headers = response.headers
+    if headers is None:
+        return []
+    # HTTPMessage supports get_all_matching; fall back to getheaders.
+    get_all = getattr(headers, "get_all_matching", None)
+    if callable(get_all):
+        try:
+            values = get_all("Set-Cookie")
+            if values:
+                return list(values)
+        except Exception:
+            pass
+    getheaders = getattr(headers, "getheaders", None)
+    if callable(getheaders):
+        try:
+            return [v for k, v in getheaders() if k.lower() == "set-cookie"]
+        except Exception:
+            return []
+    single = headers.get("Set-Cookie")
+    return [single] if single else []
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Capture 302 responses instead of following them (to read cookies)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def login_with_password(
+    username: str,
+    password: str,
+    *,
+    timeout: float = 20.0,
+) -> tuple[str, str | None]:
+    """
+    Log in with LeetCode username/password and return (LEETCODE_SESSION, csrf).
+
+    Flow (same as leetcode-cli): GET login page for csrftoken, then POST
+    form {csrfmiddlewaretoken, login, password}. Success is HTTP 302 with
+    LEETCODE_SESSION in Set-Cookie.
+
+    Raises LoginError on bad credentials, captcha/Cloudflare blocks, or
+    unexpected responses. Stdlib only.
+    """
+    if not username or not password:
+        raise LoginError("LEETCODE_USERNAME and LEETCODE_PASSWORD must be set")
+
+    opener = urllib.request.build_opener(_NoRedirect)
+
+    # 1. GET login page to obtain initial csrftoken.
+    get_req = urllib.request.Request(
+        LEETCODE_LOGIN_URL,
+        method="GET",
+        headers={
+            "User-Agent": BROWSER_UA,
+            "Accept": "text/html,application/xhtml+xml",
+            "Referer": f"{LEETCODE_ORIGIN}/",
+        },
+    )
+    try:
+        with opener.open(get_req, timeout=timeout) as resp:
+            login_csrf = extract_cookie_value(_collect_set_cookies(resp), "csrftoken")
+            if not login_csrf:
+                # Some edges render the token only in HTML; try that fallback.
+                html = resp.read().decode("utf-8", errors="replace")
+                marker = "csrfmiddlewaretoken"
+                idx = html.find(marker)
+                if idx != -1:
+                    snippet = html[idx : idx + 500]
+                    import re
+
+                    m = re.search(r'value="([^"]{8,})"', snippet)
+                    if m:
+                        login_csrf = m.group(1)
+            if not login_csrf:
+                raise LoginError("Could not obtain login csrftoken (blocked?)")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            raise LoginError(
+                "Login page blocked (403 Cloudflare/captcha). "
+                "Refresh LEETCODE_SESSION manually."
+            ) from exc
+        raise LoginError(f"Login page HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise LoginError(f"Network error on login page: {exc.reason}") from exc
+
+    # 2. POST credentials.
+    form = urllib.parse.urlencode(
+        {
+            "csrfmiddlewaretoken": login_csrf,
+            "login": username,
+            "password": password,
+        }
+    ).encode("utf-8")
+    post_req = urllib.request.Request(
+        LEETCODE_LOGIN_URL,
+        data=form,
+        method="POST",
+        headers={
+            "User-Agent": BROWSER_UA,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": LEETCODE_ORIGIN,
+            "Referer": LEETCODE_LOGIN_URL,
+            "Cookie": f"csrftoken={login_csrf}",
+        },
+    )
+    try:
+        with opener.open(post_req, timeout=timeout) as resp:
+            # If we get 200 instead of 302, login failed (bad creds/captcha).
+            body = resp.read().decode("utf-8", errors="replace")[:500]
+            if "error" in body.lower() or "captcha" in body.lower():
+                raise LoginError("Login rejected (bad credentials or captcha)")
+            raise LoginError("Login failed: expected redirect, got 200 (bad password?)")
+    except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308):
+            cookies = _collect_set_cookies(exc)
+            # urllib HTTPError for redirect still carries headers.
+            session = extract_cookie_value(cookies, "LEETCODE_SESSION")
+            csrf = extract_cookie_value(cookies, "csrftoken")
+            if not session:
+                raise LoginError("Login redirect without LEETCODE_SESSION") from exc
+            return session, csrf
+        if exc.code == 403:
+            raise LoginError(
+                "Login blocked (403 Cloudflare/captcha). "
+                "Refresh LEETCODE_SESSION manually."
+            ) from exc
+        raise LoginError(f"Login POST HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise LoginError(f"Network error on login POST: {exc.reason}") from exc
+
+
+def update_dotenv_value(path: Path, key: str, value: str) -> None:
+    """Upsert KEY=VALUE in a .env file (creates parent dirs as needed)."""
+    lines: list[str] = []
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    found = False
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if stripped.startswith(f"{key}="):
+            lines[i] = f"{key}={value}"
+            found = True
+            break
+    if not found:
+        if lines and lines[-1].strip():
+            lines.append(f"{key}={value}")
+        elif not lines:
+            lines = [f"{key}={value}"]
+        else:
+            lines.append(f"{key}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def is_challenge_done(daily_user_status: str | None) -> bool:
@@ -558,6 +744,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Exit 0 with no stdout when the daily is already done (for cron)",
     )
+    parser.add_argument(
+        "--username",
+        default=os.environ.get("LEETCODE_USERNAME"),
+        help="LeetCode username for --auto-refresh (default: $LEETCODE_USERNAME)",
+    )
+    parser.add_argument(
+        "--auto-refresh",
+        action="store_true",
+        default=os.environ.get("LEETCODE_AUTO_REFRESH", "").lower()
+        in ("1", "true", "yes", "on"),
+        help=(
+            "When not signed in, try password login with LEETCODE_USERNAME / "
+            "LEETCODE_PASSWORD to refresh LEETCODE_SESSION once. "
+            "Enable via flag or LEETCODE_AUTO_REFRESH=1."
+        ),
+    )
+    parser.add_argument(
+        "--save-session",
+        action="store_true",
+        default=os.environ.get("LEETCODE_SAVE_SESSION", "").lower()
+        in ("1", "true", "yes", "on"),
+        help=(
+            "With --auto-refresh: upsert the refreshed LEETCODE_SESSION "
+            "(and csrftoken) into --env-file. Enable via flag or "
+            "LEETCODE_SAVE_SESSION=1. In CI update the secret instead."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -577,6 +790,11 @@ def run(argv: list[str] | None = None) -> int:
         args.csrf
         or os.environ.get("LEETCODE_CSRFTOKEN")
         or os.environ.get("CSRFTOKEN")
+    )
+    username = args.username or os.environ.get("LEETCODE_USERNAME")
+    password = os.environ.get("LEETCODE_PASSWORD")
+    auto_refresh = bool(args.auto_refresh) or bool(
+        os.environ.get("LEETCODE_AUTO_REFRESH", "").lower() in ("1", "true", "yes", "on")
     )
 
     if args.silent and not args.notify:
@@ -601,6 +819,33 @@ def run(argv: list[str] | None = None) -> int:
                 print(f"Telegram error: {tg_exc}", file=sys.stderr)
                 return 2
         return 2
+
+    if not challenge.is_signed_in and auto_refresh:
+        if not username or not password:
+            print(
+                "Auto-refresh requested but LEETCODE_USERNAME/LEETCODE_PASSWORD "
+                "not set; skipping.",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                session, csrf = login_with_password(username, password)
+                os.environ["LEETCODE_SESSION"] = session
+                if csrf:
+                    os.environ["LEETCODE_CSRFTOKEN"] = csrf
+                if args.save_session:
+                    env_path = Path(pre_args.env_file)
+                    update_dotenv_value(env_path, "LEETCODE_SESSION", session)
+                    if csrf:
+                        update_dotenv_value(env_path, "LEETCODE_CSRFTOKEN", csrf)
+                    print(f"Refreshed session saved to {env_path}", file=sys.stderr)
+                else:
+                    print("Session refreshed via password login.", file=sys.stderr)
+                challenge = fetch_daily_challenge(session=session, csrf=csrf)
+            except LoginError as exc:
+                print(f"Auto-refresh failed: {exc}", file=sys.stderr)
+                # Fall through with the original signed-out challenge so
+                # Telegram still sends the loud session-invalid alert.
 
     suppress_stdout = (
         args.quiet_ok and challenge.is_signed_in and challenge.is_done
