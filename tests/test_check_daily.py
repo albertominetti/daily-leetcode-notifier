@@ -451,6 +451,9 @@ class DotenvAndErrorHandlingTests(unittest.TestCase):
                 "TEST_KEY1=alpha\n"
                 "TEST_KEY2='single quoted'\n"
                 "TEST_KEY3=\"double quoted\"\n"
+                "export TEST_KEY4=exported_val\n"
+                "TEST_KEY5=val_with_comment # inline comment\n"
+                "TEST_KEY6=\"quoted # not comment\"\n"
                 "INVALID_LINE\n"
                 "EXISTING_KEY=new_val\n",
                 encoding="utf-8",
@@ -460,6 +463,9 @@ class DotenvAndErrorHandlingTests(unittest.TestCase):
                 self.assertEqual(os.environ.get("TEST_KEY1"), "alpha")
                 self.assertEqual(os.environ.get("TEST_KEY2"), "single quoted")
                 self.assertEqual(os.environ.get("TEST_KEY3"), "double quoted")
+                self.assertEqual(os.environ.get("TEST_KEY4"), "exported_val")
+                self.assertEqual(os.environ.get("TEST_KEY5"), "val_with_comment")
+                self.assertEqual(os.environ.get("TEST_KEY6"), "quoted # not comment")
                 # Existing key must NOT be overwritten
                 self.assertEqual(os.environ.get("EXISTING_KEY"), "original_val")
 
